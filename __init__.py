@@ -1,5 +1,5 @@
 """
-PersonaKit — User profile extraction and management toolkit.
+PersonaTrace — User profile extraction and management toolkit.
 A modular user profiling system featuring:
 - Dual-track profile taxonomy (Work + Persona)
 - LLM-driven profile extraction
