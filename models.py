@@ -1,5 +1,5 @@
 """
-PersonaKit data models.
+PersonaTrace data models.
 Defines the dual-track profiling taxonomy:
 - Work Track: what the user knows and does
 - Persona Track: how the user communicates and thinks
