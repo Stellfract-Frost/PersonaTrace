@@ -1,5 +1,5 @@
 """
-PersonaKit configuration module.
+PersonaTrace configuration module.
 Configure via environment variables or the PersonaConfig dataclass.
 """
 import os
@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 @dataclass
 class PersonaConfig:
-    """PersonaKit global configuration."""
+    """Personat=Trace global configuration."""
     # LLM config
     llm_api_key: str = ""
     llm_base_url: str = "https://api.openai.com/v1"
