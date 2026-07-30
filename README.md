@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-Build structured user profiles from conversations and documents. PersonaKit watches interactions, extracts what it learns into a dual-track profile (Work + Persona), and stores it in a vector database so future conversations can surface the right context.
+Build structured user profiles from conversations and documents. PersonaTrace watches interactions, extracts what it learns into a dual-track profile (Work + Persona), and stores it in a vector database so future conversations can surface the right context.
 
 ## Installation
 
@@ -62,7 +62,7 @@ Each conversation turn goes through three stages:
 
 1. **Extract** — LLM pulls candidate labels from the exchange
 2. **Search** — Query the vector store for semantically similar items already on file
-3. **Dedup** — LLM decides: merge with existing, flag as contradiction, mark as correction, or skip
+3. **Merge** — LLM compares new items against existing ones: same thing? merge and boost confidence. Contradiction? flag it. Old info corrected? update it. Something new? add it.
 
 This keeps the profile from bloating — repeated information raises confidence instead of creating duplicates.
 
@@ -92,11 +92,11 @@ Key thresholds (set on `PersonaConfig`):
 
 ## Features
 
-- **Confidence system** — every trait carries a score. Repeated mentions raise it; inactivity decays it over time. The LLM dedup stage can also adjust confidence based on new evidence.
+- **Confidence system** — every trait carries a score. Repeated mentions raise it; inactivity decays it over time. The LLM merge stage can also adjust confidence when new evidence comes in.
 - **Temporal rhythms** — clusters observations by hour and weekday. A pattern that appears on 3+ different days within a ±1h window gets promoted to a rhythm record.
 - **Multi-format ingestion** — `FileLoader` handles `.pdf`, `.pptx`, `.docx`, `.xlsx`, plus plain text, markdown, JSON, CSV, and source files. Drop a resume or slide deck and it'll extract what it can.
 - **Semantic reranking** — when formatting a profile for a specific query, pulls the top-15 most relevant items so output is focused on what matters.
-- **Cross-category dedup** — if the same trait shows up in both `traits` and `style_notes`, only the higher-confidence copy survives.
+- **Cross-category deduplication** — if the same trait shows up in both `traits` and `style_notes`, only the higher-confidence copy survives. No duplicate clutter.
 - **Mem0 integration** (optional) — set `PERSONA_ENABLE_MEM0=1` to add [Mem0](https://github.com/mem0ai/mem0) conversation memory alongside the structured profile. Off by default; the core system doesn't need it.
 
 ## What It's Good For
@@ -106,7 +106,7 @@ Key thresholds (set on `PersonaConfig`):
 - Tracking user goals, expertise, and decision patterns in coaching tools
 - Building team skill maps from aggregated work-track profiles
 
-A note on scope: PersonaKit is a profiling engine — it builds and queries structured user models. It is not a chatbot, not a prompt manager, and not a general-purpose memory layer (see Mem0 for that). It works at its best when you have ongoing conversations with a known user and want the assistant to remember who they are.
+A note on scope: PersonaTrace is a profiling engine — it builds and queries structured user models. It is not a chatbot, not a prompt manager, and not a general-purpose memory layer (see Mem0 for that). It works at its best when you have ongoing conversations with a known user and want the assistant to remember who they are.
 
 ## Dependencies
 
