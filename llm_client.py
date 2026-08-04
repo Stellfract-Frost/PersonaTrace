@@ -6,7 +6,7 @@ Not tied to a specific model provider.
 import json
 import re
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 import requests
 from .config import PersonaConfig
 logger = logging.getLogger(__name__)
