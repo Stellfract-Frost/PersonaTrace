@@ -1,4 +1,4 @@
-chromadb>=0.4.16  # code uses PersistentClient and $and where syntax; verified against 1.5.9
+chromadb>=0.4.16  # code uses PersistentClient and $and where filters
 requests>=2.28.0
 numpy>=1.21.0
 # optional advanced-feature dependencies
