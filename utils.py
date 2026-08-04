@@ -2,7 +2,6 @@
 Utility functions.
 """
 import re
-from typing import Any, Dict
 def mask_secret(key: str) -> str:
     """Mask an API key for safe logging.
     Args:
