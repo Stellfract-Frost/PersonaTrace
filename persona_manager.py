@@ -76,7 +76,17 @@ class PersonaManager:
                     items = data.get(track, {}).get(cat, [])
                     self.store.delete_category(user_id, cat)
                     if items: self.store.upsert_items(user_id, cat, items)
-            self.store.upsert_meta(user_id, "_version", {"version": data["version"]})
+            # Cross-cutting state is stored as non-searchable meta points, not per-category items
+            meta = {
+                "_version": {"version": data["version"]},
+                "_last_updated": data["last_updated"],
+                "_graph_edges": data.get("graph_edges", []),
+                "_interaction": data.get("interaction", {"prefer_few_questions": False}),
+                "_pending_advisor": data.get("pending_advisor"),
+                "_profile_completeness": data.get("profile_completeness", {"work": 0.0, "persona": 0.0}),
+            }
+            for key, value in meta.items():
+                self.store.upsert_meta(user_id, key, value)
     # ── Mem0 conversation memory interface ──
     def add_memory(self, messages: List[Dict[str, str]], user_id: str = "default") -> None:
         """Add conversation to Mem0 memory."""
@@ -120,12 +130,21 @@ class PersonaManager:
         if not result: return {"status": "no_result"}
         data = self.load(user_id)
         changed = self._apply_extraction_result(data, result, "Conversation extract")
-        # Handle V2 special actions: confidence adjustment, contradiction downgrade, label deprecation
+        # Handle V2 special actions: confidence adjustment, contradiction downgrade, label deprecation, corrections
         if "confidence_adjust" in result:
             self._apply_confidence_adjust(data, result["confidence_adjust"])
             changed = True
         if "_v2_deprecate_labels" in result:
             self._apply_deprecate(data, result["_v2_deprecate_labels"])
+            changed = True
+        if "corrections" in result:
+            self._apply_corrections(data, result["corrections"])
+            changed = True
+        if "contradictions" in result:
+            self._apply_contradictions(data, result["contradictions"])
+            changed = True
+        # Record an observation for rhythm analysis; forces a save so it persists
+        if self._record_observation(data, result, user_msg, now):
             changed = True
         if changed:
             self._recompute_completeness(data)
@@ -137,7 +156,7 @@ class PersonaManager:
         wu = result.get("work_updates", {})
         for cat in ["expertise", "goals", "projects"]:
             if wu.get(cat) and self._merge_items(data["work"][cat], wu[cat], ts_now): changed = True
-        for cat in ["likes", "dislikes", "constraints"]:
+        for cat in ["likes", "dislikes", "constraints", "explicit_facts"]:
             items = wu.get(cat, [])
             if items:
                 if isinstance(items[0], dict) and self._merge_items(data["work"][cat], items, ts_now): changed = True
@@ -153,8 +172,8 @@ class PersonaManager:
         """Apply confidence adjustments to matching items."""
         for adj in adjustments:
             label = adj.get("label", "")
-            new_c = adj.get("new_confidence", 0)
-            if not label or not new_c: continue
+            new_c = min(1.0, max(0.0, float(adj.get("new_confidence", 0) or 0)))
+            if not label or new_c <= 0: continue
             for container in [data["work"], data["persona"]]:
                 for cat, items in container.items():
                     for item in items:
@@ -171,6 +190,116 @@ class PersonaManager:
                         item for item in items
                         if self.similarity.compute(self.similarity.extract_label(item), label) < self.config.sim_threshold
                     ]
+    def _apply_corrections(self, data: Dict, corrections: List[Dict]) -> None:
+        """Apply correction records: relabel matching old items to the corrected label and log the correction.
+        If the corrected label already exists, merge the old items into it instead of creating a duplicate.
+        """
+        now = datetime.now().isoformat()
+        containers = (data.get("work", {}), data.get("persona", {}))
+        for c in corrections:
+            old = c.get("label", "")
+            new = c.get("correction", "")
+            if not old or not new:
+                continue
+            # find an item already carrying the corrected label (string match, not semantic)
+            new_target = None
+            new_l = new.lower()
+            for container in containers:
+                for cat, items in container.items():
+                    if cat in ("corrections", "rhythms"):
+                        continue
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        l = self.similarity.extract_label(item).lower()
+                        if l == new_l or (len(l) >= 2 and len(new_l) >= 2 and (l in new_l or new_l in l)):
+                            new_target = item
+                            break
+                    if new_target:
+                        break
+                if new_target:
+                    break
+            for container in containers:
+                for cat, items in container.items():
+                    if cat in ("corrections", "rhythms"):
+                        continue
+                    keep = []
+                    for item in items:
+                        if isinstance(item, dict) and self.similarity.compute(self.similarity.extract_label(item), old) >= self.config.sim_threshold:
+                            if item is new_target:
+                                keep.append(item)
+                            elif new_target is not None:
+                                new_target["hits"] = new_target.get("hits", 0) + 1
+                                new_target["confidence"] = min(0.99, max(item.get("confidence", 0.5), new_target.get("confidence", 0.5)) + 0.025)
+                                new_target["updated"] = now
+                            else:
+                                item["label"] = new
+                                item["confidence"] = max(0.20, item.get("confidence", 0.5) - 0.15)
+                                item["updated"] = now
+                                keep.append(item)
+                        else:
+                            keep.append(item)
+                    container[cat] = keep
+            data.get("persona", {}).setdefault("corrections", []).append(
+                {"label": old, "correction": new, "reason": c.get("reason", ""), "updated": now}
+            )
+    def _apply_contradictions(self, data: Dict, contradictions: List[Dict]) -> None:
+        """Apply contradiction records: downgrade both sides and log the contradiction."""
+        now = datetime.now().isoformat()
+        log = data.get("cross", {}).setdefault("analysis_log", [])
+        for c in contradictions:
+            a = c.get("item_a", "")
+            b = c.get("item_b", "")
+            for lbl in (a, b):
+                if not lbl:
+                    continue
+                for container in (data.get("work", {}), data.get("persona", {})):
+                    for cat, items in container.items():
+                        for item in items:
+                            if isinstance(item, dict) and self.similarity.compute(self.similarity.extract_label(item), lbl) >= self.config.sim_threshold:
+                                item["confidence"] = max(0.20, item.get("confidence", 0.5) - 0.15)
+                                item["updated"] = now
+            log.append({"label": a or b, "item_a": a, "item_b": b, "resolution": c.get("resolution", ""), "ts": now})
+            if len(log) > self.config.max_analysis_log:
+                del log[:len(log) - self.config.max_analysis_log]
+    def _record_observation(self, data: Dict, result: Dict, user_msg: str, now: datetime) -> bool:
+        """Record a user-activity observation and hourly density stats for rhythm analysis."""
+        label = ""
+        wu = result.get("work_updates", {}) or {}
+        pu = result.get("persona_updates", {}) or {}
+        for cat in ("expertise", "goals", "projects", "likes", "dislikes", "constraints", "explicit_facts"):
+            for it in wu.get(cat, []) or []:
+                lbl = it.get("label", "") if isinstance(it, dict) else str(it)
+                if lbl and len(lbl) >= 2:
+                    label = lbl
+                    break
+            if label:
+                break
+        if not label:
+            for cat in ("traits", "interests", "identity", "style_notes", "decision_style", "interpersonal", "boundaries"):
+                for it in pu.get(cat, []) or []:
+                    lbl = it.get("label", "") if isinstance(it, dict) else str(it)
+                    if lbl and len(lbl) >= 2:
+                        label = lbl
+                        break
+                if label:
+                    break
+        if not label:
+            label = " ".join(user_msg.split())[:40]
+        label = label.strip()
+        if not label:
+            return False
+        obs = data.get("ephemeral", {}).setdefault("observation_log", [])
+        obs.append({"ts": now.isoformat(), "hour": now.hour, "label": label, "confidence": 0.5})
+        # cap growth beyond what the 60-day prune in rhythm.process keeps around
+        if len(obs) > 200:
+            del obs[:len(obs) - 200]
+        key = (now.weekday(), now.hour)
+        d = self._hourly_density.setdefault(key, {"count": 0, "total_len": 0, "ask_count": 0})
+        d["count"] += 1
+        d["total_len"] += len(user_msg)
+        d["ask_count"] += 1 if (user_msg.rstrip().endswith("?") or "?" in user_msg) else 0
+        return True
     def _merge_items(self, existing: List, new_items: List, ts_now: str, default_conf: float = 0.5) -> bool:
         changed = False
         for raw in new_items:
@@ -210,9 +339,10 @@ class PersonaManager:
         now = datetime.now()
         ts_now = now.isoformat()
         last_up = data.get("last_updated", "")
+        # decay only once per day: if the profile was saved today, any due decay is already applied
         if last_up:
             try:
-                if datetime.fromisoformat(last_up).date() < now.date(): return
+                if datetime.fromisoformat(last_up).date() == now.date(): return
             except: pass
         rates = self.config.decay_rates
         def process(container: List, is_work: bool = False) -> List:
