@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 @dataclass
 class PersonaConfig:
-    """Personat=Trace global configuration."""
+    """PersonaTrace global configuration."""
     # LLM config
     llm_api_key: str = ""
     llm_base_url: str = "https://api.openai.com/v1"
@@ -16,11 +16,9 @@ class PersonaConfig:
     embed_model: str = "multi-qa-MiniLM-L6-cos-v1"
     embed_dims: int = 384
     # Storage config
-    vector_store_path: str = "./persona_data/chroma"
     data_dir: str = "./persona_data"
     # Mem0 conversation memory config
     enable_mem0: bool = False
-    mem0_store_path: str = "./persona_data/mem0"
     # Advanced retrieval config (15+3 rerank)
     enable_rerank: bool = False
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -51,3 +49,6 @@ class PersonaConfig:
     @property
     def vector_store_path(self) -> str:
         return os.path.join(self.data_dir, "chroma")
+    @property
+    def mem0_store_path(self) -> str:
+        return os.path.join(self.data_dir, "mem0")
