@@ -28,8 +28,6 @@ class PersonaFormatter:
         persona = data.get("persona", {})
         cross = data.get("cross", {})
         ephemeral = data.get("ephemeral", {})
-        has_work = any(work.get(cat) for cat in WORK_CATEGORIES)
-        has_persona = any(persona.get(cat) for cat in PERSONA_CATEGORIES if cat != "corrections")
         # 15+3 semantic rerank
         filter_shown = None
         if query and enable_rerank:
@@ -42,7 +40,7 @@ class PersonaFormatter:
         if persona_lines:
             lines.append("\n### Communication Profile")
             lines.extend(persona_lines)
-        if not has_work and not has_persona:
+        if not work_lines and not persona_lines:
             lines.append("\nNo known preferences yet (new user, profile being built)")
         return "\n".join(lines)
     def _llm_filter_batch(self, query: str, work: Dict, persona: Dict, ephemeral: Dict, cross: Dict) -> Dict[str, List]:
@@ -99,6 +97,11 @@ class PersonaFormatter:
             lines.append("**Constraints**")
             for item in constr:
                 lines.append(f"  - {self.similarity.extract_label(item)}")
+        facts = get_items("explicit_facts", 4)
+        if facts:
+            lines.append("**Facts**")
+            for item in facts:
+                lines.append(f"  - {self.similarity.extract_label(item)}")
         return lines
     def _format_persona_track(self, persona: Dict[str, List], max_items: int, filter_shown: Optional[Dict] = None) -> List[str]:
         lines = []
@@ -118,10 +121,33 @@ class PersonaFormatter:
         if ds:
             lines.append("**L3 Decision Style**")
             for item in ds: lines.append(f"  - {self.similarity.extract_label(item)}")
+        l2_items = []
+        for cat, max_n in [("style_notes", 3), ("behavior_patterns", 3)]:
+            for item in get_items(cat, max_n):
+                label = self.similarity.extract_label(item)
+                conf = self._get_conf(item)
+                l2_items.append(f"  - {label} ({self._conf_tag(conf)})")
+        if l2_items:
+            lines.append("**L2 Communication & Behavior Style**")
+            lines.extend(l2_items)
+        ip = get_items("interpersonal", 3)
+        if ip:
+            lines.append("**L4 Interpersonal**")
+            for item in ip: lines.append(f"  - {self.similarity.extract_label(item)}")
         bd = get_items("boundaries", 3)
         if bd:
             lines.append("**L5 Boundaries & Safety Rules**")
             for item in bd: lines.append(f"  - {self.similarity.extract_label(item)}")
+        rhythms = persona.get("rhythms", [])[:5]
+        if rhythms:
+            lines.append("**Rhythms**")
+            for r in rhythms:
+                lines.append(f"  - {r.get('label', '')} — {r.get('time_note', '')} (x{r.get('occurrences', 1)})")
+        corrections = persona.get("corrections", [])[:3]
+        if corrections:
+            lines.append("**Corrections**")
+            for c in corrections:
+                lines.append(f"  - {c.get('label', '')} → {c.get('correction', '')}")
         return lines
     @staticmethod
     def _get_conf(item: Any) -> float:
