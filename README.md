@@ -111,7 +111,7 @@ A note on scope: PersonaTrace is a profiling engine — it builds and queries st
 ## Dependencies
 
 ```
-chromadb>=0.4.0          # vector storage
+chromadb>=0.4.16         # vector storage
 requests>=2.28.0         # LLM API calls
 numpy>=1.21.0            # similarity math
 sentence-transformers>=2.2.0  # embeddings
