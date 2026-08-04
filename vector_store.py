@@ -37,6 +37,7 @@ class VectorStore:
         self.client = chromadb.PersistentClient(path=config.vector_store_path)
         self.collection = self.client.get_or_create_collection(CHROMA_COLLECTION)
         self.embed_fn = None  # injected externally
+        self._embed_dim = None  # actual embedding dimension, learned from embed_fn output
         self._lock = threading.Lock()
     def set_embed_fn(self, embed_fn):
         """Set the embedding function.
@@ -51,14 +52,22 @@ class VectorStore:
             return [[0.0] * dims for _ in texts]
         try:
             vecs = self.embed_fn(texts)
-            return [list(v) for v in vecs]
+            out = [list(v) for v in vecs]
+            if out:
+                self._embed_dim = len(out[0])
+            return out
         except Exception as e:
             logger.warning("Embedding generation failed: %s", e)
             return [[0.0] * dims for _ in texts]
     @staticmethod
-    def _make_id(user_id: str, category: str, label: str) -> str:
-        """Generate a deterministic UUID based on user_id:category:label."""
+    def _make_id(user_id: str, category: str, label: str, item: Any = None) -> str:
+        """Generate a deterministic UUID based on user_id:category:label.
+        Items with a ts field (e.g. observation_log) are additionally keyed by ts
+        so repeated labels under the same category don't collide.
+        """
         key = f"{user_id}:{category}:{label.lower().strip()}"
+        if isinstance(item, dict) and item.get("ts"):
+            key += f":{item['ts']}"
         return str(uuid.uuid5(uuid.NAMESPACE_DNS, key))
     def upsert_items(
         self, user_id: str, category: str, items: List[Any]
@@ -82,7 +91,7 @@ class VectorStore:
         ids, documents, metadatas, embeddings = [], [], [], []
         now_ts = datetime.now().isoformat()
         for item, label, vec in zip(valid_items, labels, vecs):
-            ids.append(self._make_id(user_id, category, label))
+            ids.append(self._make_id(user_id, category, label, item))
             documents.append(label)
             confidence = item.get("confidence", 0.5) if isinstance(item, dict) else 0.5
             meta = {
@@ -116,7 +125,7 @@ class VectorStore:
         try:
             self.collection.upsert(
                 ids=[point_id], documents=[label], metadatas=[meta],
-                embeddings=[[0.0] * self.config.embed_dims],
+                embeddings=[[0.0] * (self._embed_dim or self.config.embed_dims)],
             )
         except Exception as e:
             logger.error("Metadata upsert failed [%s]: %s", label, e)
@@ -170,7 +179,7 @@ class VectorStore:
             "cross": cross_dict,
             "ephemeral": ephemeral_dict,
             "graph_edges": meta_dict.get("_graph_edges", []),
-            "last_updated": datetime.now().isoformat(),
+            "last_updated": meta_dict.get("_last_updated", datetime.now().isoformat()),
             "version": meta_dict.get("_version", {}).get("version", 0),
             "interaction": meta_dict.get("_interaction", {"prefer_few_questions": False}),
             "pending_advisor": meta_dict.get("_pending_advisor"),
@@ -187,9 +196,11 @@ class VectorStore:
         vecs = self._embed([query_text])
         if not vecs:
             return []
-        where = {"user_id": user_id}
+        # chroma rejects a flat multi-key where; multiple filters must be wrapped in $and
         if category:
-            where["category"] = category
+            where = {"$and": [{"user_id": user_id}, {"category": category}]}
+        else:
+            where = {"user_id": user_id}
         try:
             results = self.collection.query(
                 query_embeddings=[vecs[0]], n_results=top_k, where=where,
