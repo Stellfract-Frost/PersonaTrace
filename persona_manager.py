@@ -4,10 +4,9 @@ Integrates storage, extraction, similarity computation, rhythm engine,
 Mem0 memory, and file parsing.
 """
 import os
-import json
 import logging
 import threading
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 from .config import PersonaConfig
 from .models import PersonaItem, ProfileData, WORK_CATEGORIES, PERSONA_CATEGORIES, CROSS_CATEGORIES, EPHEMERAL_CATEGORIES
@@ -42,10 +41,12 @@ class PersonaManager:
         """Initialize Mem0 conversation memory."""
         try:
             from mem0 import Memory
+            base = self.config.llm_base_url.rstrip("/")
+            openai_base_url = base if base.endswith("/v1") else base + "/v1"
             cfg = {
                 "llm": {"provider": "openai", "config": {
                     "model": self.config.llm_model, "api_key": self.config.llm_api_key,
-                    "openai_base_url": self.config.llm_base_url + "/v1"
+                    "openai_base_url": openai_base_url
                 }},
                 "embedder": {"provider": "huggingface", "config": {"model": self.config.embed_model}},
                 "vector_store": {"provider": "qdrant", "config": {
@@ -97,7 +98,7 @@ class PersonaManager:
         """Search Mem0 for relevant conversation history."""
         if not self.memory: return []
         try:
-            result = self.memory.search(query, filters={"user_id": user_id}, limit=limit)
+            result = self.memory.search(query, filters={"user_id": user_id}, top_k=limit)
             return [m.get('memory', '') for m in result.get("results", []) if isinstance(m, dict)]
         except Exception as e:
             logger.error("Mem0 search failed: %s", e)
@@ -149,6 +150,12 @@ class PersonaManager:
         if changed:
             self._recompute_completeness(data)
             self.save(data, user_id)
+        # Mem0: store the raw conversation turn alongside the structured profile
+        if self.memory:
+            self.add_memory([
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": ai_reply},
+            ], user_id=user_id)
         return {"status": "success" if changed else "no_change"}
     def _apply_extraction_result(self, data: Dict, result: Dict, source_label: str = "") -> bool:
         changed = False
@@ -378,4 +385,11 @@ class PersonaManager:
     ) -> str:
         """Format profile to readable text. If query is given and enable_rerank=True, applies 15+3 semantic reranking."""
         if data is None: data = self.load(user_id)
-        return self.formatter.format(data, query=query, enable_rerank=enable_rerank)
+        text = self.formatter.format(data, query=query, enable_rerank=enable_rerank)
+        # Mem0: surface relevant raw conversation history for the query
+        if query and self.memory:
+            memories = self.search_memory(query, user_id=user_id)
+            if memories:
+                text += "\n\n### Relevant Conversation Memory\n"
+                text += "\n".join(f"  - {m}" for m in memories[:5])
+        return text
