@@ -72,7 +72,6 @@ class PersonaExtractor:
         for new_lbl, matches in similar_map.items():
             old_info = []
             for score, payload in matches:
-                item_data = payload.get("item_data", {})
                 old_info.append({
                     "label": payload.get("label", ""),
                     "confidence": payload.get("confidence", 0.5),
