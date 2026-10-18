@@ -5,7 +5,7 @@ Defines the dual-track profiling taxonomy:
 - Persona Track: how the user communicates and thinks
 """
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 # ── Dual-track taxonomy ──
 # Work Track: what the user knows/does — knowledge, preferences, and facts

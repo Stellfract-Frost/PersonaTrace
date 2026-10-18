@@ -4,7 +4,6 @@ Configure via environment variables or the PersonaConfig dataclass.
 """
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 @dataclass
 class PersonaConfig:
     """PersonaTrace global configuration."""

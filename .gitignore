@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Local Claude Code settings (machine-specific paths & permissions)
+.claude/
+
+# Runtime data (chroma vector store, mem0 memory)
+persona_data/
+
+# Environment files
+.env
+# Tests
+.pytest_cache/
+# Logs
+logs/
+*.log
