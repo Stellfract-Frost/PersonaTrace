@@ -4,9 +4,14 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![MCP](https://img.shields.io/badge/MCP-ready-4B5563)](MCP.md)
 
-**一个知道「现在还成立什么」的记忆层。**
+**一个会说「还剩几天」的记忆层。**
 
-[English](README.md)
+[English](README.md) · [AstrBot 插件](https://github.com/Stellfract-Frost/astrbot_plugin_personatrace)
+
+多数记忆层回答「这条现在还成立吗」。那是关于过去的问题：写总结时有用，排下周的计划时没用。
+
+真正会改变判断的是「它还能撑多久」。所以每条信条都带 `due_in`——还剩 2 天、已经超期一周。
+agent 能据此行动，「三月起成立」不能。
 
 模型没有时间概念。它会把三个月前你已经放弃的偏好当成现状，会把一对矛盾的两句话同时记住，也不会告诉你某个结论是从哪句话推出来的。一轮对话看不出来，做几周规划就会崩。
 

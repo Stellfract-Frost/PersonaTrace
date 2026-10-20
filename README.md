@@ -4,9 +4,13 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![MCP](https://img.shields.io/badge/MCP-ready-4B5563)](MCP.md)
 
-**A memory layer that knows what is still true.**
+**A memory layer that says how long something is still good for.**
 
-[中文说明](README.zh-CN.md)
+[中文说明](README.zh-CN.md) · [AstrBot plugin](https://github.com/Stellfract-Frost/astrbot_plugin_personatrace)
+
+Most memory layers answer *"is this still true?"* — a question about the past. Useful when you are writing a summary, useless when you are planning next week.
+
+The question that changes a decision is *"how long is this still good for?"* So every belief carries `due_in`: two days left, overdue by a week. An agent can act on that. It cannot act on "true since March".
 
 Models have no sense of time. They will happily treat a preference you dropped in July as current, keep both sides of a contradiction, and never tell you which sentence a conclusion came from. One turn hides it. Weeks of planning exposes it.
 
