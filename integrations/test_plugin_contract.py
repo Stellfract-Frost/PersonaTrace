@@ -271,6 +271,28 @@ def test_host_llm_bridges_sync_call_to_async_provider():
         loop.call_soon_threadsafe(loop.stop)
 
 
+def test_loads_like_astrbot_does(tmp_path, monkeypatch):
+    """按 AstrBot 的方式加载：__import__("data.plugins.<name>.main", fromlist=["main"])。
+
+    这条验证的是相对导入 `from . import adapter` 在宿主的加载方式下能否成立
+    —— 用 sys.path 直接 import 是测不出来的。
+    """
+    import shutil
+
+    plugin_dir = HERE / "astrbot_plugin_personatrace"
+    target = tmp_path / "data" / "plugins" / "astrbot_plugin_personatrace"
+    target.parent.mkdir(parents=True)
+    shutil.copytree(plugin_dir, target, ignore=shutil.ignore_patterns("_data", "__pycache__"))
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in [m for m in sys.modules if m.startswith("data.plugins")]:
+        del sys.modules[name]
+
+    mod = __import__("data.plugins.astrbot_plugin_personatrace.main", fromlist=["main"])
+    assert hasattr(mod, "Main")
+    assert hasattr(mod, "adapter") or mod.adapter is not None
+
+
 if __name__ == "__main__":
     for fn in (
         test_cold_start_injects_nothing,
@@ -280,6 +302,8 @@ if __name__ == "__main__":
         test_bad_key_rejected,
         test_extract_bridge_writes_into_memory_v2,
         test_host_llm_bridges_sync_call_to_async_provider,
+        test_inject_only_once_per_turn,
+        test_per_group_scope,
     ):
         fn()
         print(f"[PASS] {fn.__name__}")
