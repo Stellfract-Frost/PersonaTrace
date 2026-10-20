@@ -1,0 +1,43 @@
+{
+  "enabled": {
+    "description": "总开关",
+    "type": "bool",
+    "default": true
+  },
+  "inject_max_items": {
+    "description": "每轮最多注入几条记忆",
+    "type": "int",
+    "default": 3
+  },
+  "inject_max_chars": {
+    "description": "注入文本上限（字符），越小越省 token",
+    "type": "int",
+    "default": 240
+  },
+  "scope": {
+    "description": "记忆粒度",
+    "type": "string",
+    "options": ["per_user", "per_group"],
+    "default": "per_user"
+  },
+  "window_cold_sec": {
+    "description": "画像未成型时的抽取间隔（秒）",
+    "type": "int",
+    "default": 120
+  },
+  "window_warm_sec": {
+    "description": "画像成型后的抽取间隔（秒）",
+    "type": "int",
+    "default": 600
+  },
+  "cold_belief_threshold": {
+    "description": "少于多少条算未成型",
+    "type": "int",
+    "default": 10
+  },
+  "max_per_turn": {
+    "description": "单轮最多写入几条",
+    "type": "int",
+    "default": 8
+  }
+}
