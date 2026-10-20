@@ -271,6 +271,36 @@ def test_host_llm_bridges_sync_call_to_async_provider():
         loop.call_soon_threadsafe(loop.stop)
 
 
+def test_remember_writes_into_memory_after_reply():
+    """写入腿全链路：after_message_sent → provider → 抽取 → MemoryV2。"""
+    p = make_plugin()
+    payload = '{"work_updates": {"goals": [{"label": "在准备四级", "confidence": 0.8}]}, "persona_updates": {}}'
+
+    class FakeProvider:
+        async def text_chat(self, prompt=None, contexts=None, system_prompt=None, model=None):
+            return types.SimpleNamespace(completion_text=payload)
+
+    async def fake_get_provider(umo=None):
+        return FakeProvider()
+
+    p.context.get_using_provider_async = fake_get_provider
+    p.cfg["window_cold_sec"] = 0          # 关掉节流，确保这次一定触发
+    e = FakeEvent("1001", "我在准备四级，专业课也忙")
+    e.set_extra("_pt_reply", "加油")
+
+    async def run():
+        await p.remember(e)
+        mem = p._mem(p._identity(e))
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if mem.state():
+                return mem.state()
+        return mem.state()
+
+    rows = asyncio.run(run())
+    assert rows and rows[0]["label"] == "在准备四级", rows
+
+
 def test_loads_like_astrbot_does(tmp_path, monkeypatch):
     """按 AstrBot 的方式加载：__import__("data.plugins.<name>.main", fromlist=["main"])。
 

@@ -186,6 +186,8 @@ class Main(star.Star):
         if not self.cfg.get("enabled", True) or _IMPORT_ERROR is not None:
             return
         try:
+            if self._loop is None:
+                self._loop = asyncio.get_running_loop()
             reply = str(event.get_extra("_pt_reply") or "").strip()
             user_msg = str(getattr(event, "message_str", "") or "").strip()
             if not user_msg:
@@ -198,18 +200,23 @@ class Main(star.Star):
             window = int(self.cfg.get("window_cold_sec", 120) if cold else self.cfg.get("window_warm_sec", 600))
             if not mem.allow("extract", window):
                 return                              # 节流：别每条消息都跑一次抽取
-            self._pool.submit(self._ingest_blocking, key, user_msg, reply)
+            # 用会话自己的 provider：多配置文件/多模型时，umo=None 会挑到别的模型
+            provider = await self.context.get_using_provider_async(event.unified_msg_origin)
+            if provider is None:
+                return
+            self._pool.submit(self._ingest_blocking, key, user_msg, reply, provider)
         except Exception as exc:
             logger.warning(f"[personatrace] schedule ingest failed: {exc}")
 
-    def _ingest_blocking(self, key: str, user_msg: str, reply: str) -> None:
+    def _ingest_blocking(self, key: str, user_msg: str, reply: str, provider: Any = None) -> None:
         """线程池里跑：同步抽取 + 写 MemoryV2。所有异常就地吞掉。"""
         try:
             mem = self._mem(key)
             with self._lock:
-                extractor = self._extractors.get(key)
-            if extractor is None:
-                provider = self.context.get_using_provider(umo=None)
+                cached = self._extractors.get(key)
+            if cached is not None and cached[0] is provider:
+                extractor = cached[1]
+            else:
                 if provider is None or self._loop is None:
                     return
                 from personatrace.config import PersonaConfig
@@ -218,7 +225,7 @@ class Main(star.Star):
                 llm = adapter.HostLLM(provider, self._loop)
                 extractor = PersonaExtractor(PersonaConfig(), llm)
                 with self._lock:
-                    self._extractors[key] = extractor
+                    self._extractors[key] = (provider, extractor)
             bridge = adapter.ExtractBridge(mem, extractor, max_per_turn=int(self.cfg.get("max_per_turn", 8)))
             written = bridge.ingest(user_msg, reply)
             if written:

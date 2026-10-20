@@ -18,6 +18,16 @@
    不需要 chromadb、sentence-transformers、Redis——插件只用 `memory_v2` + `extractor`。
 3. 在 WebUI 重载插件。
 
+## 适配的平台与身份键
+
+- 目标形态：**AstrBot 插件 + aiocqhttp（OneBot v11 反向 WebSocket）**，例如 SnowLuma / NapCat 这类实现。
+  平台名固定为 `aiocqhttp`，与 OneBot v11 适配器一致。
+- 身份键：`aiocqhttp:<QQ号>`。私聊与群聊里**同一个人共用一份**；`scope=per_group` 时改用
+  `aiocqhttp:group:<群号>`（整群共享一份关系记忆）。
+- **不依赖 FastAPI、也不依赖 MCP**：插件只 import `personatrace` 的核心模块，零第三方依赖，
+  不需要起 uvicorn，也不需要配 MCP server。
+- 管理员命令要求 AstrBot 配置里的 `admins_id` 含你的 QQ 号；若设置了唤醒前缀，命令需带上。
+
 ## 命令（仅管理员）
 
 | 命令 | 作用 |

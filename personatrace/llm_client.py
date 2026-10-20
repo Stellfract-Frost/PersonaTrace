@@ -7,7 +7,6 @@ import json
 import re
 import logging
 from typing import List, Dict, Any, Optional
-import requests
 from .config import PersonaConfig
 logger = logging.getLogger(__name__)
 class LLMClient:
@@ -42,6 +41,12 @@ class LLMClient:
         Raises:
             RuntimeError: if the API call fails
         """
+        try:                      # 延迟导入：extract_json 这类纯解析函数不该被 requests 绑架
+            import requests
+        except ImportError as exc:  # pragma: no cover - 只在没装 requests 时发生
+            raise RuntimeError(
+                "LLMClient 需要 requests：pip install \"personatrace[llm]\""
+            ) from exc
         if not self.api_key:
             raise RuntimeError(
                 "LLM API key not configured. Set the PERSONA_LLM_API_KEY environment variable "
