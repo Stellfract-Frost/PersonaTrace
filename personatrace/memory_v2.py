@@ -809,6 +809,41 @@ class MemoryV2:
         ranked = sorted(counts.items(), key=lambda x: -x[1])[:top]
         return [{"next": k, "p": round(v / total, 3), "support": v} for k, v in ranked]
 
+    # -- 活跃时段：从行为事件推出「他一般几点上线」 --
+    def active_hours(self, window: int = 300, min_days: int = 3, span: int = 3) -> Optional[Dict[str, Any]]:
+        """从行为事件的时间戳里找出最活跃的连续 span 小时。
+
+        门槛与节律模块一致：至少 span 个不同日期才给结论，否则宁可不说。
+        返回 {"start": 23, "end": 1, "days": 4, "samples": 37}，样本不足返回 None。
+        """
+        events = self.b.zrangebyscore(self._bh, 0, time.time() + 86400)[-window:]
+        if not events:
+            return None
+        hours: Dict[int, int] = {}
+        days = set()
+        for _member, ts in events:
+            hours[int(time.localtime(ts).tm_hour)] = hours.get(int(time.localtime(ts).tm_hour), 0) + 1
+            days.add(time.strftime("%Y-%m-%d", time.localtime(ts)))
+        if len(days) < min_days:
+            return None
+
+        # 用圆周均值找中心小时，再向两侧展开 span 小时（避免窗口偏到一边）
+        total = sum(hours.values())
+        sin_sum = sum(c * math.sin(2 * math.pi * h / 24) for h, c in hours.items())
+        cos_sum = sum(c * math.cos(2 * math.pi * h / 24) for h, c in hours.items())
+        peak = int(round((math.atan2(sin_sum, cos_sum) * 24 / (2 * math.pi)) % 24)) % 24
+        best_start = (peak - span // 2) % 24
+        best_score = sum(hours.get((best_start + i) % 24, 0) for i in range(span))
+        if best_score <= 0:
+            return None
+        return {
+            "start": best_start,
+            "end": (best_start + span) % 24,
+            "days": len(days),
+            "samples": len(events),
+            "share": round(best_score / max(1, total), 3),
+        }
+
     # -- 自适应节流：per-user TTL 窗口，替代全局时间戳变量 --
     def allow(self, name: str, window_sec: int) -> bool:
         return self.b.setnx(f"throttle:{self.user_id}:{name}", "1", ttl=window_sec)

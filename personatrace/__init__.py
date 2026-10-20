@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # 轻量、无外部依赖的成员（导入本包时不触发 chromadb / requests）
 from .config import PersonaConfig

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "personatrace"
-version = "1.1.0"
+version = "1.2.0"
 description = "A memory layer that knows what still holds: time-aware beliefs with retention decay, dual temporal queries and evidence-backed retrieval."
 readme = "README.md"
 requires-python = ">=3.10"
