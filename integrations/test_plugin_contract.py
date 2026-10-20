@@ -131,8 +131,13 @@ def req():
 
 
 def make_plugin():
+    """契约测试不落盘：注入内存后端，持久化由 test_persistence.py 单独覆盖。"""
+    from personatrace.memory_v2 import MemoryBackend
+
     ctx = types.SimpleNamespace(get_using_provider=lambda umo=None: None)
-    return plugin_main.Main(context=ctx, config={"inject_max_items": 3})
+    plugin = plugin_main.Main(context=ctx, config={"inject_max_items": 3})
+    plugin._backend = MemoryBackend()
+    return plugin
 
 
 def test_cold_start_injects_nothing():

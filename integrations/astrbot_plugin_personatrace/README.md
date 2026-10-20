@@ -32,7 +32,7 @@
 
 ## 已知限制
 
-- **后端默认进程内**：AstrBot 重启记忆就没了。要持久化需装 `redis` 包并起 Redis，或等 JSON 后端落地。
+- **后端默认落 SQLite**：`<AstrBot 数据目录>/plugin_data/astrbot_plugin_personatrace/memory.db`，重启不丢；装了 `redis` 且配置可用时优先用 Redis（多进程共享）。
 - **不带向量去重**：靠 `uuid5(user:track:category:label)` 主键 + hits 强化，字面不同但同义的结论仍会分两条。
 - `persona` 轨的部分类别（`traits` / `style_notes` / `interpersonal` / `boundaries`）在 `CATEGORY_STABILITY` 里没有定义，会落到 60 天默认稳定度。
 - 记忆里的原文证据最多保留 50 条/结论（`MAX_EVIDENCE`）。

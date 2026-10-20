@@ -21,7 +21,7 @@ MCP server 是它对外唯一的标准出口。任何支持 MCP 的宿主（Clau
 
 放在宿主的 MCP 配置文件里（Claude Desktop 是 `claude_desktop_config.json`，Cursor 是 `.cursor/mcp.json`）。
 
-**不需要** Redis、MySQL、API Key、网络。没有 Redis 时自动用进程内后端；装了 Redis 就自动共享（多进程、重启不丢）。
+**不需要** Redis、MySQL、API Key、网络。默认落 SQLite（`~/.personatrace/memory.db`），重启不丢；装了 redis 包且给 `PERSONA_DB` 指向 Redis 时自动切过去共享；`PERSONA_DB=off` 则退回进程内（仅测试用）。
 
 ---
 
