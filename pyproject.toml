@@ -8,7 +8,8 @@ version = "1.1.0"
 description = "A memory layer that knows what still holds: time-aware beliefs with retention decay, dual temporal queries and evidence-backed retrieval."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Stellfract-Frost" }]
 keywords = [
   "memory", "llm", "mcp", "mcp-server", "agent", "user-profile",
@@ -16,7 +17,6 @@ keywords = [
 ]
 classifiers = [
   "Programming Language :: Python :: 3",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
 ]
 # 内核零依赖：memory_v2 只用标准库
