@@ -82,8 +82,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize"}' | python mcp_serv
 ## 5. 自测
 
 ```bash
-python -m pytest test_mcp_server.py -q     # 10 项：协议 + 端到端子进程
-python -m pytest test_memory_v2.py -q      # 13 项：内核算法
+python -m pytest test_mcp_server.py -q     # 10 tests: protocol + real subprocess end-to-end
+python -m pytest test_memory_v2.py -q      # 17 tests: kernel algorithms
 ```
 
 其中 `test_stdio_end_to_end` 会真实起一个 `mcp_server.py` 子进程，走 stdin/stdout 完成 initialize → tools/list → observe → state 全链路。

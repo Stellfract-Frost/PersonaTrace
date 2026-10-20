@@ -108,7 +108,7 @@ mem0 在 2026 年把 UPDATE/DELETE 砍掉，改成只追加 + 检索期做时间
 ### Python SDK
 
 ```python
-from persona import PersonaConfig, PersonaManager, LLMClient
+from personatrace import PersonaConfig, PersonaManager, LLMClient
 from sentence_transformers import SentenceTransformer
 
 cfg = PersonaConfig(llm_api_key="sk-...", llm_base_url="https://api.openai.com/v1", llm_model="gpt-4o")
