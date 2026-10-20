@@ -78,13 +78,17 @@ class Main(star.Star):
             return pathlib.Path.cwd() / "data"
 
     def _shared_backend(self):
-        """后端只建一次：内存后端是进程内的，多实例共享同一个才能读到彼此写的数据。"""
+        """后端只建一次：SQLite 落在 AstrBot 的插件数据目录，重启不丢。"""
         if self._backend is None:
-            from personatrace.memory_v2 import build_backend
+            from personatrace.memory_v2 import SQLiteBackend, build_backend
 
-            backend, mode = build_backend()
-            self._backend = backend
-            logger.info(f"[personatrace] backend = {mode}")
+            db_path = str(self._data_dir / "memory.db")
+            try:
+                self._backend = SQLiteBackend(db_path)
+                logger.info(f"[personatrace] backend = sqlite ({db_path})")
+            except Exception as exc:
+                self._backend, mode = build_backend()
+                logger.warning(f"[personatrace] sqlite 不可用（{exc}），退回 {mode}")
         return self._backend
 
     def _mem(self, key: str):

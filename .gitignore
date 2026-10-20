@@ -5,3 +5,4 @@ build/
 dist/
 persona_data/
 .pytest_cache/
+_data/

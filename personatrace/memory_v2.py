@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import threading
 import time
 import uuid
@@ -131,9 +132,170 @@ class MemoryBackend:
             return len(self._z.get(key, {}))
 
 
+class SQLiteBackend:
+    """SQLite 后端：单机默认落盘方案。零依赖（标准库 sqlite3）。
+
+    只实现本模块用到的那一小撮命令，语义与 Redis 版对齐：
+      hash → t_hash(key, field, value)
+      kv   → t_kv(key, value, expires_at)    支持 TTL，用于 lock / throttle
+      zset → t_zset(key, member, score)
+    写入即提交（WAL），进程被杀也不会丢已返回的结论。
+    """
+
+    def __init__(self, path: str) -> None:
+        import sqlite3
+
+        self.path = str(path)
+        if self.path != ":memory:":
+            parent = os.path.dirname(os.path.abspath(self.path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=10.0)
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS t_hash (
+                    key TEXT NOT NULL, field TEXT NOT NULL, value TEXT,
+                    PRIMARY KEY (key, field)
+                );
+                CREATE TABLE IF NOT EXISTS t_kv (
+                    key TEXT PRIMARY KEY, value TEXT, expires_at REAL
+                );
+                CREATE TABLE IF NOT EXISTS t_zset (
+                    key TEXT NOT NULL, member TEXT NOT NULL, score REAL NOT NULL,
+                    PRIMARY KEY (key, member)
+                );
+                CREATE INDEX IF NOT EXISTS i_zset_key_score ON t_zset (key, score);
+                """
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.close()
+            raise
+
+    # -- hash --
+    def hset(self, key: str, mapping: Dict[str, Any]) -> None:
+        rows = [
+            (key, str(f), v if isinstance(v, str) else json.dumps(v, ensure_ascii=False))
+            for f, v in mapping.items()
+        ]
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT INTO t_hash (key, field, value) VALUES (?, ?, ?) "
+                "ON CONFLICT(key, field) DO UPDATE SET value = excluded.value",
+                rows,
+            )
+
+    def hgetall(self, key: str) -> Dict[str, str]:
+        with self._lock:
+            cur = self._conn.execute("SELECT field, value FROM t_hash WHERE key = ?", (key,))
+            return {f: v for f, v in cur.fetchall()}
+
+    def hincrby(self, key: str, field: str, amount: int = 1) -> int:
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT value FROM t_hash WHERE key = ? AND field = ?", (key, field)
+            ).fetchone()
+            value = (int(row[0]) if row else 0) + amount
+            self._conn.execute(
+                "INSERT INTO t_hash (key, field, value) VALUES (?, ?, ?) "
+                "ON CONFLICT(key, field) DO UPDATE SET value = excluded.value",
+                (key, field, str(value)),
+            )
+            return value
+
+    # -- kv（支持 TTL） --
+    def _drop_expired(self, key: str) -> None:
+        self._conn.execute(
+            "DELETE FROM t_kv WHERE key = ? AND expires_at IS NOT NULL AND expires_at <= ?",
+            (key, time.time()),
+        )
+
+    def get(self, key: str) -> Optional[str]:
+        with self._lock, self._conn:
+            self._drop_expired(key)
+            row = self._conn.execute("SELECT value FROM t_kv WHERE key = ?", (key,)).fetchone()
+            return row[0] if row else None
+
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+        payload = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        expires = time.time() + ttl if ttl else None
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO t_kv (key, value, expires_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
+                (key, payload, expires),
+            )
+
+    def setnx(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+        payload = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        expires = time.time() + ttl if ttl else None
+        with self._lock, self._conn:
+            self._drop_expired(key)
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO t_kv (key, value, expires_at) VALUES (?, ?, ?)",
+                (key, payload, expires),
+            )
+            return cur.rowcount == 1
+
+    # -- zset --
+    def zadd(self, key: str, mapping: Dict[str, float]) -> None:
+        rows = [(key, str(m), float(s)) for m, s in mapping.items()]
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT INTO t_zset (key, member, score) VALUES (?, ?, ?) "
+                "ON CONFLICT(key, member) DO UPDATE SET score = excluded.score",
+                rows,
+            )
+
+    def zrangebyscore(self, key: str, lo: float, hi: float) -> List[Tuple[str, float]]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT member, score FROM t_zset WHERE key = ? AND score >= ? AND score <= ? "
+                "ORDER BY score",
+                (key, lo, hi),
+            )
+            return [(m, s) for m, s in cur.fetchall()]
+
+    def ztrim_last(self, key: str, keep: int) -> None:
+        with self._lock, self._conn:
+            total = self._conn.execute(
+                "SELECT COUNT(*) FROM t_zset WHERE key = ?", (key,)
+            ).fetchone()[0]
+            if total <= keep:
+                return
+            self._conn.execute(
+                "DELETE FROM t_zset WHERE key = ? AND member IN "
+                "(SELECT member FROM t_zset WHERE key = ? ORDER BY score LIMIT ?)",
+                (key, key, total - keep),
+            )
+
+    def zcard(self, key: str) -> int:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM t_zset WHERE key = ?", (key,)
+            ).fetchone()[0]
+
+    def delete(self, *keys: str) -> None:
+        with self._lock, self._conn:
+            for k in keys:
+                self._conn.execute("DELETE FROM t_hash WHERE key = ?", (k,))
+                self._conn.execute("DELETE FROM t_kv WHERE key = ?", (k,))
+                self._conn.execute("DELETE FROM t_zset WHERE key = ?", (k,))
+
+    def close(self) -> None:
+        with self._lock:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+
 class RedisBackend:
     """Redis 后端：多进程共享。只包装本模块用到的命令。"""
-
     def __init__(self, url: str = "redis://127.0.0.1:6379/0", prefix: str = "pt:") -> None:
         self.r = _redis.Redis.from_url(url, decode_responses=True)
         self.p = prefix
@@ -179,14 +341,30 @@ class RedisBackend:
         return int(self.r.zcard(self.p + key))
 
 
-def build_backend(url: Optional[str] = None) -> Tuple[Any, str]:
-    """返回 (backend, mode)。没有 Redis 或连不上时静默降级。"""
+DEFAULT_DB_PATH = os.path.join(os.path.expanduser("~"), ".personatrace", "memory.db")
+DB_ENV = "PERSONA_DB"
+
+
+def build_backend(url: Optional[str] = None, db_path: Optional[str] = None) -> Tuple[Any, str]:
+    """返回 (backend, mode)。优先级：Redis → SQLite（默认落盘）→ 进程内。
+
+    - 装了 redis 包且给了 url → Redis（多进程共享）
+    - 否则落 SQLite 文件：db_path > 环境变量 PERSONA_DB > ~/.personatrace/memory.db
+    - PERSONA_DB=off / memory:// / :memory: → 进程内（重启即丢，仅用于测试）
+    任何异常都退回进程内，绝不让"记不住"升级成"起不来"。
+    """
     if _redis is not None and url != "memory://":
         try:
             return RedisBackend(url or "redis://127.0.0.1:6379/0"), "redis"
         except Exception:
             pass
-    return MemoryBackend(), "memory"
+    target = db_path or os.environ.get(DB_ENV) or DEFAULT_DB_PATH
+    if str(target).strip().lower() in {"", "off", "none", "memory", "memory://", ":memory:"}:
+        return MemoryBackend(), "memory"
+    try:
+        return SQLiteBackend(str(target)), "sqlite"
+    except Exception:
+        return MemoryBackend(), "memory"
 
 
 # ---------------------------------------------------------------- 衰减
@@ -347,8 +525,11 @@ class Guard:
 class MemoryV2:
     """时序人格记忆内核。所有写操作幂等，所有读操作带时间维度。"""
 
-    def __init__(self, backend: Any = None, user_id: str = "default_user") -> None:
-        self.b, self.mode = (backend, "injected") if backend is not None else build_backend()
+    def __init__(self, backend: Any = None, user_id: str = "default_user", db_path: Optional[str] = None) -> None:
+        if backend is not None:
+            self.b, self.mode = backend, "injected"
+        else:
+            self.b, self.mode = build_backend(db_path=db_path)
         # 空 user_id 会让所有记录塌进同一个命名空间（belief::{bid}），是静默的跨用户串味。
         uid = (user_id or "").strip()
         if not uid:
