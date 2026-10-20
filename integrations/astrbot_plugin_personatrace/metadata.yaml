@@ -1,5 +1,0 @@
-name: astrbot_plugin_personatrace
-desc: 时序记忆层 —— 她记得你现在是什么状态、哪条结论快过期了（PersonaTrace 的 AstrBot 适配）。
-author: Stellfract-Frost
-version: 0.1.0
-repo: https://github.com/Stellfract-Frost/PersonaTrace

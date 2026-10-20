@@ -92,7 +92,8 @@ MCP 只提供工具，工具是否被调用由模型决定；而「她记得我�
 
 ```bash
 pip install "personatrace @ git+https://github.com/Stellfract-Frost/PersonaTrace"
-# 把 integrations/astrbot_plugin_personatrace/ 放进 AstrBot 的 data/plugins/，WebUI 重载
+# 插件单独一个仓库，克隆到 AstrBot 的 data/plugins/ 后重载：
+#   git clone https://github.com/Stellfract-Frost/astrbot_plugin_personatrace
 personatrace-doctor     # 三秒钟确认「写得进、读得回、重启还在」
 ```
 

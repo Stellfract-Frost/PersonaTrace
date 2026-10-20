@@ -92,7 +92,8 @@ has to happen unconditionally, so AstrBot gets a **plugin**:
 
 ```bash
 pip install "personatrace @ git+https://github.com/Stellfract-Frost/PersonaTrace"
-# put integrations/astrbot_plugin_personatrace/ into AstrBot's data/plugins/, reload in WebUI
+# the plugin lives in its own repo — clone it into AstrBot's data/plugins/ and reload:
+#   git clone https://github.com/Stellfract-Frost/astrbot_plugin_personatrace
 personatrace-doctor     # proves it writes, reads back, and survives a restart
 ```
 
