@@ -10,8 +10,8 @@ import sys
 
 import pytest
 
-import mcp_server
-from memory_v2 import MemoryBackend, MemoryV2
+from personatrace import mcp_server
+from personatrace.memory_v2 import MemoryBackend, MemoryV2
 
 
 @pytest.fixture(autouse=True)

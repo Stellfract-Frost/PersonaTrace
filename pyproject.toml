@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "personatrace"
+version = "1.1.0"
+description = "A memory layer that knows what still holds: time-aware beliefs with retention decay, dual temporal queries and evidence-backed retrieval."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Stellfract-Frost" }]
+keywords = [
+  "memory", "llm", "mcp", "mcp-server", "agent", "user-profile",
+  "long-term-memory", "ebbinghaus", "temporal", "astrbot",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+# 内核零依赖：memory_v2 只用标准库
+dependencies = []
+
+[project.optional-dependencies]
+llm = ["requests>=2.28.0"]
+vector = ["chromadb>=0.4.16", "sentence-transformers>=2.2.0", "numpy>=1.21.0"]
+api = ["fastapi>=0.100", "uvicorn>=0.24"]
+all = [
+  "requests>=2.28.0",
+  "chromadb>=0.4.16",
+  "sentence-transformers>=2.2.0",
+  "numpy>=1.21.0",
+  "fastapi>=0.100",
+  "uvicorn>=0.24",
+]
+
+[project.scripts]
+personatrace-mcp = "personatrace.mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/Stellfract-Frost/PersonaTrace"
+Issues = "https://github.com/Stellfract-Frost/PersonaTrace/issues"
+
+[tool.setuptools.packages.find]
+include = ["personatrace*"]
+
+[tool.pytest.ini_options]
+testpaths = ["."
+]

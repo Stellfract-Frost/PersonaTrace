@@ -1,17 +1,14 @@
-chromadb>=0.4.16  # code uses PersistentClient and $and where filters
-requests>=2.28.0
-numpy>=1.21.0
-# optional advanced-feature dependencies
-mem0>=0.1.0
-sentence-transformers>=2.2.0
-python-pptx>=0.6.23
-python-docx>=1.1.0
-pypdf>=4.0.0
-openpyxl>=3.1.0
-
-# optional: HTTP layer (api_v2.py)
-fastapi>=0.100
-uvicorn>=0.24
-
-# optional: tests (test_memory_v2.py / test_mcp_server.py)
-pytest>=7.0
+# 内核（memory_v2 / MCP server）零依赖，只用 Python 标准库：
+#   python mcp_server.py            # 直接可用，无需安装任何东西
+#
+# 需要额外能力时按组安装（见 pyproject.toml）：
+#   pip install "personatrace[llm]"      # LLMClient / 抽取管线（requests）
+#   pip install "personatrace[vector]"   # chromadb + sentence-transformers + numpy
+#   pip install "personatrace[api]"      # FastAPI 层（api_v2.build_router）
+#   pip install "personatrace[all]"
+#
+# 开发：
+#   pip install -e . && pip install pytest
+#
+# 说明：mem0 / python-pptx / python-docx / pypdf / openpyxl 只在旧版
+# file_loader 与 mem0 存储路径上用到，不再作为默认依赖，避免一次拖进 ~1GB 轮子。

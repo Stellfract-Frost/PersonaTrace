@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from memory_v2 import (
+from personatrace.memory_v2 import (
     ARCHIVE_AT, CATEGORY_STABILITY, Conflict, MemoryBackend, MemoryV2,
     belief_id, reinforce, retention, stability_from_half_life,
 )
@@ -150,7 +150,7 @@ def test_api_router():
 def test_aging_lines_forward_looking():
     """前瞻两段：超期/拖太久 + 高价值但没强化过的。"""
     import datetime as dt
-    from memory_v2 import aging_lines
+    from personatrace.memory_v2 import aging_lines
 
     now = dt.datetime.now()
     skills = {
@@ -177,7 +177,7 @@ def test_aging_lines_forward_looking():
 def test_aging_lines_no_memory_v2_fallback():
     """没装 v2 时宿主必须完全不受影响。"""
     import datetime as dt
-    from memory_v2 import aging_lines
+    from personatrace.memory_v2 import aging_lines
     assert aging_lines({}, dt.datetime.now()) == []
 
 
@@ -216,7 +216,7 @@ def test_expand_limits_depth(mem):
 
 def test_pick_cross_category_prefers_other_tracks():
     """15 定点 + 3 跨类别：3 条必须来自没入选的类别，且同类不重复。"""
-    from memory_v2 import pick_cross_category
+    from personatrace.memory_v2 import pick_cross_category
 
     rest = [
         {"label": "同为 goals 的第二名", "cat": "goals"},
@@ -232,7 +232,7 @@ def test_pick_cross_category_prefers_other_tracks():
 
 def test_pick_cross_category_backfills_when_short():
     """候选不够时不能空手：凑满 limit，但依然优先不同类别。"""
-    from memory_v2 import pick_cross_category
+    from personatrace.memory_v2 import pick_cross_category
 
     rest = [{"label": "只有这一条", "cat": "likes"}]
     picked = pick_cross_category(rest, exclude_cats={"goals", "identity"}, limit=3)
