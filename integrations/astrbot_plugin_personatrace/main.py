@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional
@@ -18,7 +19,13 @@ from astrbot.api import star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 
-from . import adapter
+try:  # 核心包没装时不要让整个插件加载失败，而是给它一个能说清楚的降级态
+    from . import adapter
+
+    _IMPORT_ERROR: Optional[BaseException] = None
+except Exception as _exc:  # pragma: no cover - 取决于部署环境
+    adapter = None  # type: ignore[assignment]
+    _IMPORT_ERROR = _exc
 
 try:  # AstrBot 较新版本才有 TextPart；老版本退回 dict
     from astrbot.core.agent.message import TextPart
@@ -41,6 +48,9 @@ except Exception:  # pragma: no cover
 
 
 PLUGIN_NAME = "astrbot_plugin_personatrace"
+_INSTALL_HINT = (
+    "记忆后端未安装：pip install \"personatrace @ git+https://github.com/Stellfract-Frost/PersonaTrace\""
+)
 
 DEFAULTS: Dict[str, Any] = {
     "enabled": True,
@@ -61,6 +71,7 @@ class Main(star.Star):
         self._mems: Dict[str, Any] = {}
         self._extractors: Dict[str, Any] = {}
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pt-ingest")
+        self._lock = threading.Lock()          # _mems / _extractors 会被事件循环和线程池同时访问
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._backend = None
         self._data_dir = self._resolve_data_dir()
@@ -94,11 +105,12 @@ class Main(star.Star):
     def _mem(self, key: str):
         from personatrace.memory_v2 import MemoryV2
 
-        mem = self._mems.get(key)
-        if mem is None:
-            mem = MemoryV2(backend=self._shared_backend(), user_id=adapter.normalize_key(key))
-            self._mems[key] = mem
-        return mem
+        with self._lock:
+            mem = self._mems.get(key)
+            if mem is None:
+                mem = MemoryV2(backend=self._shared_backend(), user_id=adapter.normalize_key(key))
+                self._mems[key] = mem
+            return mem
 
     def _identity(self, event: AstrMessageEvent) -> str:
         platform = ""
@@ -138,8 +150,10 @@ class Main(star.Star):
 
     @filter.on_llm_request()
     async def inject_memory(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
-        if not self.cfg.get("enabled", True):
+        if not self.cfg.get("enabled", True) or _IMPORT_ERROR is not None:
             return
+        if event.get_extra("_pt_injected"):
+            return                              # agent 回路会多次请求模型，每轮只注入一次
         try:
             self._loop = asyncio.get_running_loop()
             mem = self._mem(self._identity(event))
@@ -153,6 +167,7 @@ class Main(star.Star):
                 return                      # 冷启动：库里没东西，什么都不加
             req.extra_user_content_parts = list(req.extra_user_content_parts or [])
             req.extra_user_content_parts.append(_text_part(text))
+            event.set_extra("_pt_injected", True)
         except Exception as exc:            # 记忆坏了不能影响聊天
             logger.warning(f"[personatrace] inject failed: {exc}")
 
@@ -168,10 +183,10 @@ class Main(star.Star):
 
     @filter.after_message_sent()
     async def remember(self, event: AstrMessageEvent) -> None:
-        if not self.cfg.get("enabled", True):
+        if not self.cfg.get("enabled", True) or _IMPORT_ERROR is not None:
             return
         try:
-            reply = str(event.get_extra("_pt_reply") or "")
+            reply = str(event.get_extra("_pt_reply") or "").strip()
             user_msg = str(getattr(event, "message_str", "") or "").strip()
             if not user_msg:
                 return
@@ -191,7 +206,8 @@ class Main(star.Star):
         """线程池里跑：同步抽取 + 写 MemoryV2。所有异常就地吞掉。"""
         try:
             mem = self._mem(key)
-            extractor = self._extractors.get(key)
+            with self._lock:
+                extractor = self._extractors.get(key)
             if extractor is None:
                 provider = self.context.get_using_provider(umo=None)
                 if provider is None or self._loop is None:
@@ -201,7 +217,8 @@ class Main(star.Star):
 
                 llm = adapter.HostLLM(provider, self._loop)
                 extractor = PersonaExtractor(PersonaConfig(), llm)
-                self._extractors[key] = extractor
+                with self._lock:
+                    self._extractors[key] = extractor
             bridge = adapter.ExtractBridge(mem, extractor, max_per_turn=int(self.cfg.get("max_per_turn", 8)))
             written = bridge.ingest(user_msg, reply)
             if written:
@@ -215,6 +232,9 @@ class Main(star.Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def show_memory(self, event: AstrMessageEvent):
         """查看某个人记住了什么：/memory <key>"""
+        if _IMPORT_ERROR is not None:
+            yield event.plain_result(_INSTALL_HINT)
+            return
         try:
             arg = self._arg(event)
             key = adapter.normalize_key(arg) if arg else self._identity(event)
@@ -239,6 +259,9 @@ class Main(star.Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def delete_memory(self, event: AstrMessageEvent):
         """删除某个人的全部记忆（不可逆）：/del <key>"""
+        if _IMPORT_ERROR is not None:
+            yield event.plain_result(_INSTALL_HINT)
+            return
         arg = self._arg(event)
         if not arg:
             yield event.plain_result("用法：/del <key>")
@@ -252,8 +275,9 @@ class Main(star.Star):
         except Exception as exc:
             yield event.plain_result(f"删除失败：{exc}")
             return
-        self._mems.pop(key, None)
-        self._extractors.pop(key, None)
+        with self._lock:
+            self._mems.pop(key, None)
+            self._extractors.pop(key, None)
         yield event.plain_result(f"已删除 {key} 的 {removed} 条记忆（不可恢复）")
 
     @staticmethod

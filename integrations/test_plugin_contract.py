@@ -204,6 +204,30 @@ def test_bad_key_rejected():
     assert "不合法" in out[0]
 
 
+def test_inject_only_once_per_turn():
+    """agent 回路会多次请求模型；同一轮只该注入一次，否则记忆会重复堆进上下文。"""
+    p = make_plugin()
+    e = FakeEvent("1001")
+    p._mem(adapter.identity_key("aiocqhttp", "1001")).observe("goals", "一次就够", track="work")
+    r1, r2 = req(), req()
+    asyncio.run(p.inject_memory(e, r1))
+    asyncio.run(p.inject_memory(e, r2))
+    assert len(r1.extra_user_content_parts) == 1
+    assert r2.extra_user_content_parts == [], "第二轮不该重复注入"
+
+
+def test_per_group_scope():
+    p = make_plugin()
+    p.cfg["scope"] = "per_group"
+    a = FakeEvent("1001", group="g1")
+    b = FakeEvent("2002", group="g1")
+    c = FakeEvent("1001", group="g2")
+    assert p._identity(a) == p._identity(b), "同群应按群共享"
+    assert p._identity(a) != p._identity(c)
+    p.cfg["scope"] = "per_user"
+    assert p._identity(a) != p._identity(b), "per_user 下应按人分开"
+
+
 def test_extract_bridge_writes_into_memory_v2():
     """写入腿：抽取结果 → MemoryV2（不经过 persona_manager 那套存储）。"""
     from personatrace.memory_v2 import MemoryBackend, MemoryV2

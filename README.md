@@ -85,6 +85,17 @@ mem0's 2026 rewrite dropped UPDATE/DELETE in favour of append-only extraction wi
 
 ## Plug it in
 
+### AstrBot (recommended: reads and writes every turn, no model cooperation needed)
+
+MCP only exposes tools; whether they get called is up to the model. "She remembers me"
+has to happen unconditionally, so AstrBot gets a **plugin**:
+
+```bash
+pip install "personatrace @ git+https://github.com/Stellfract-Frost/PersonaTrace"
+# put integrations/astrbot_plugin_personatrace/ into AstrBot's data/plugins/, reload in WebUI
+personatrace-doctor     # proves it writes, reads back, and survives a restart
+```
+
 ### MCP (no adapter code)
 
 ```json

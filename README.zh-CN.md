@@ -85,6 +85,22 @@ mem0 在 2026 年把 UPDATE/DELETE 砍掉，改成只追加 + 检索期做时间
 
 ## 怎么接
 
+### AstrBot（推荐：每轮自动读写，不靠模型自觉）
+
+MCP 只提供工具，工具是否被调用由模型决定；而「她记得我」需要无条件发生。
+所以 AstrBot 接的是**插件**，不是 MCP：
+
+```bash
+pip install "personatrace @ git+https://github.com/Stellfract-Frost/PersonaTrace"
+# 把 integrations/astrbot_plugin_personatrace/ 放进 AstrBot 的 data/plugins/，WebUI 重载
+personatrace-doctor     # 三秒钟确认「写得进、读得回、重启还在」
+```
+
+- 每轮请求前把 2–3 条最该被想起的记忆塞进当前轮（空库时完全不注入）
+- 每轮回复后丢线程池，用宿主自己的模型抽取，按 `allow()` 节流
+- `/memory <key>` 查看、`/del <key>` 彻底删除（仅管理员）
+- 默认落 SQLite（插件数据目录），重启不丢
+
 ### MCP（不用写适配层）
 
 ```json
@@ -130,7 +146,7 @@ print(mgr.format_profile(user_id="alice"))
 | 已完成 | 下一步 |
 |---|---|
 | 读时计算保持率，不需要定时全表扫 | 证据双向查询（证据 → 它支撑了哪些结论） |
-| 双时态 + `as_of` 回溯 | MySQL 落盘（证据 / 信条 / 事件） |
+| 双时态 + `as_of` 回溯 | SQLite 已默认落盘；MySQL 仍待定 |
 | 两级检索（索引 → 回表） | `as_of` 接进对话 prompt |
 | 节律链路：被动采样 → ≥3 天门槛 → 升格即消费 | 意图路由（事实 / 建议 / 回忆 / 自我认知） |
 | 行为序列 + 下一步预测 | 量化「放弃即时分析」带来的精度损失 |
