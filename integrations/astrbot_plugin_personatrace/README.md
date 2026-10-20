@@ -10,10 +10,11 @@
 ## 安装
 
 1. 把本目录改名/放到 AstrBot 的 `data/plugins/astrbot_plugin_personatrace/`。
-2. 安装核心包（需要 PersonaTrace ≥ 1.1.0，带 `pyproject.toml` 的版本）：
+2. 安装核心包（尚未发布 PyPI，直接从仓库装）：
    ```bash
-   pip install "personatrace>=1.1.0"
+   pip install "personatrace @ git+https://github.com/Stellfract-Frost/PersonaTrace"
    ```
+   或在本仓库根目录 `pip install -e .`。
    不需要 chromadb、sentence-transformers、Redis——插件只用 `memory_v2` + `extractor`。
 3. 在 WebUI 重载插件。
 

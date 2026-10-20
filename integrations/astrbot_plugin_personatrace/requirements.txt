@@ -1,2 +1,2 @@
-# 核心包（需要 PersonaTrace >= 1.1.0，即带 pyproject.toml 的版本）
-personatrace>=1.1.0
+# 尚未发布到 PyPI，直接从仓库安装：
+personatrace @ git+https://github.com/Stellfract-Frost/PersonaTrace
