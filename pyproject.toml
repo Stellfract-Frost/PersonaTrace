@@ -37,6 +37,7 @@ all = [
 
 [project.scripts]
 personatrace-mcp = "personatrace.mcp_server:main"
+personatrace-doctor = "personatrace.doctor:main"
 
 [project.urls]
 Homepage = "https://github.com/Stellfract-Frost/PersonaTrace"
