@@ -917,6 +917,20 @@ class MemoryV2:
     def directives(self, group_key: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
         return self.mentions(kind="directive", limit=limit, group_key=group_key)
 
+    def overview(self) -> Dict[str, int]:
+        """一眼看全：他自己的信条 / 别人说的 / 对他的指令。
+
+        `/memory` 只数信条会撒谎——用户看到"3 条"，其实库里还有别人的转述
+        和管理员的指令。给一个诚实的汇总，存储仍然是两张表。
+        """
+        rows = self.state(include_archived=True, include_invalidated=True)
+        mentions = self.mentions(limit=MAX_MENTIONS)
+        return {
+            "beliefs": len(rows),
+            "claims": sum(1 for m in mentions if m.get("kind") == "claim"),
+            "directives": sum(1 for m in mentions if m.get("kind") == "directive"),
+        }
+
     # -- 活跃时段：从行为事件推出「他一般几点上线」 --
     def active_hours(self, window: int = 300, min_days: int = 3, span: int = 3) -> Optional[Dict[str, Any]]:
         """从行为事件的时间戳里找出最活跃的连续 span 小时。

@@ -369,3 +369,21 @@ def test_purge_clears_mentions(tmp_path):
 
     again = MemoryV2(db_path=db, user_id="u:205")
     assert again.mentions() == [], "重启后也不该残留"
+
+
+def test_overview_counts_three_kinds():
+    """/memory 只数信条会撒谎：转述和指令也要报出来。"""
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:206")
+    m.observe("goals", "在准备四级", track="work")
+    m.observe_mention("u:1", "claim", "state", "别人说他很忙")
+    m.observe_mention("u:9", "directive", "constraints", "碰到他就骂他")
+    assert m.overview() == {"beliefs": 1, "claims": 1, "directives": 1}
+
+
+def test_overview_counts_three_kinds():
+    """/memory 只数信条会撒谎：转述和指令也要报出来。"""
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:206")
+    m.observe("goals", "在准备四级", track="work")
+    m.observe_mention("u:1", "claim", "state", "别人说他很忙")
+    m.observe_mention("u:9", "directive", "constraints", "碰到他就骂他")
+    assert m.overview() == {"beliefs": 1, "claims": 1, "directives": 1}
