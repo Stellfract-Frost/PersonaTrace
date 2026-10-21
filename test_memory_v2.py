@@ -241,3 +241,131 @@ def test_pick_cross_category_backfills_when_short():
     rest2 = [{"label": "a", "cat": "likes"}, {"label": "b", "cat": "likes"}]
     picked2 = pick_cross_category(rest2, exclude_cats=set(), limit=3)
     assert [p["label"] for p in picked2] == ["a", "b"]      # 不足则回填，不造假
+
+
+# ---------------------------------------------------------------- 第三方记录
+
+
+def test_mention_claim_and_directive_are_separate():
+    """别人说他的事 / 别人要求怎么对他，要分开取。"""
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:200")
+    m.observe_mention("u:300", "claim", "state", "老王说他最近在考研")
+    m.observe_mention("u:100", "directive", "constraints", "碰到这个 id 骂他")
+
+    assert [x["label"] for x in m.directives()] == ["碰到这个 id 骂他"]
+    assert [x["label"] for x in m.mentions(kind="claim")] == ["老王说他最近在考研"]
+    assert len(m.mentions()) == 2
+
+
+def test_mention_dedup_counts_hits():
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:201")
+    for _ in range(3):
+        m.observe_mention("u:300", "claim", "state", "他说自己最近很忙")
+    rows = m.mentions()
+    assert len(rows) == 1 and rows[0]["hits"] == 3
+
+
+def test_mention_group_scope():
+    """群 1 的话不能在群 2 里被引用；scope='*' 例外。"""
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:202")
+    m.observe_mention("u:1", "claim", "state", "在群一说的", group_key="g1")
+    m.observe_mention("u:1", "claim", "state", "在群二说的", group_key="g2")
+    m.observe_mention("u:1", "directive", "constraints", "全局指令", group_key="*")
+
+    g1 = [x["label"] for x in m.mentions(group_key="g1")]
+    assert "在群一说的" in g1 and "在群二说的" not in g1
+    assert any(x["label"] == "全局指令" for x in m.mentions(group_key="g1"))
+
+
+def test_mention_second_hand_decays_faster():
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:203")
+    m.observe_mention("u:1", "claim", "goals", "别人说的目标")
+    row = m.mentions()[0]
+    assert abs(row["stability"] - CATEGORY_STABILITY["goals"] * 0.4) < 1e-6
+
+
+def test_mention_bad_input():
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:204")
+    for kwargs in ({"kind": "guess", "label": "x"}, {"kind": "claim", "label": ""}):
+        try:
+            m.observe_mention("u:1", kwargs["kind"], "state", kwargs["label"])
+        except ValueError:
+            continue
+        raise AssertionError(f"应当拒绝：{kwargs}")
+
+
+def test_purge_clears_mentions(tmp_path):
+    """删掉关于我的记录，必须连第三方记录一起清。"""
+    db = str(tmp_path / "m.db")
+    m = MemoryV2(db_path=db, user_id="u:205")
+    m.observe("goals", "在准备四级", track="work")
+    m.observe_mention("u:1", "claim", "state", "别人说他很忙")
+    assert m.purge() == 1
+    assert m.mentions() == []
+
+    again = MemoryV2(db_path=db, user_id="u:205")
+    assert again.mentions() == [], "重启后也不该残留"
+
+
+# ---------------------------------------------------------------- 第三方记录
+
+
+def test_mention_claim_and_directive_are_separate():
+    """别人说他的事 / 别人要求怎么对他，要分开取。"""
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:200")
+    m.observe_mention("u:300", "claim", "state", "老王说他最近在考研")
+    m.observe_mention("u:100", "directive", "constraints", "碰到这个 id 骂他")
+
+    assert [x["label"] for x in m.directives()] == ["碰到这个 id 骂他"]
+    assert [x["label"] for x in m.mentions(kind="claim")] == ["老王说他最近在考研"]
+    assert len(m.mentions()) == 2
+
+
+def test_mention_dedup_counts_hits():
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:201")
+    for _ in range(3):
+        m.observe_mention("u:300", "claim", "state", "他说自己最近很忙")
+    rows = m.mentions()
+    assert len(rows) == 1 and rows[0]["hits"] == 3
+
+
+def test_mention_group_scope():
+    """群 1 的话不能在群 2 里被引用；scope='*' 例外。"""
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:202")
+    m.observe_mention("u:1", "claim", "state", "在群一说的", group_key="g1")
+    m.observe_mention("u:1", "claim", "state", "在群二说的", group_key="g2")
+    m.observe_mention("u:1", "directive", "constraints", "全局指令", group_key="*")
+
+    g1 = [x["label"] for x in m.mentions(group_key="g1")]
+    assert "在群一说的" in g1 and "在群二说的" not in g1
+    assert any(x["label"] == "全局指令" for x in m.mentions(group_key="g1"))
+
+
+def test_mention_second_hand_decays_faster():
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:203")
+    m.observe_mention("u:1", "claim", "goals", "别人说的目标")
+    row = m.mentions()[0]
+    assert abs(row["stability"] - CATEGORY_STABILITY["goals"] * 0.4) < 1e-6
+
+
+def test_mention_bad_input():
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:204")
+    for kwargs in ({"kind": "guess", "label": "x"}, {"kind": "claim", "label": ""}):
+        try:
+            m.observe_mention("u:1", kwargs["kind"], "state", kwargs["label"])
+        except ValueError:
+            continue
+        raise AssertionError(f"应当拒绝：{kwargs}")
+
+
+def test_purge_clears_mentions(tmp_path):
+    """删掉关于我的记录，必须连第三方记录一起清。"""
+    db = str(tmp_path / "m.db")
+    m = MemoryV2(db_path=db, user_id="u:205")
+    m.observe("goals", "在准备四级", track="work")
+    m.observe_mention("u:1", "claim", "state", "别人说他很忙")
+    assert m.purge() == 1
+    assert m.mentions() == []
+
+    again = MemoryV2(db_path=db, user_id="u:205")
+    assert again.mentions() == [], "重启后也不该残留"

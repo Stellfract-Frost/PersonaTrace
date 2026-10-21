@@ -388,6 +388,9 @@ ARCHIVE_AT = 0.30        # 保留率低于此值 → 归档（不参与 recall�
 REINFORCE_K = 0.6        # 间隔效应增益系数
 MAX_EVIDENCE = 50        # 单条信条保留的原文证据上限（超出按 FIFO 淘汰并清理 L0）
 MAX_STABILITY_MULTIPLE = 20.0   # 稳定度最多涨到该类别初始值的 20 倍，防止变成"永不衰减"
+MAX_MENTIONS = 500              # 单个主体保留的第三方记录上限（超出按时间淘汰）
+MENTION_RAW_LIMIT = 300         # 第三方记录里的原话上限
+MENTION_STABILITY_FACTOR = 0.4  # 二手信息失真快：稳定度打 4 折
 
 
 def stability_from_half_life(half_life_days: float) -> float:
@@ -680,7 +683,11 @@ class MemoryV2:
                     self.b.delete(f"evidence:{uid}:{eid}")
                 removed += 1
             self.b.delete(f"belief:{uid}:{bid}")
-        self.b.delete(f"timeline:{uid}", f"behavior:{uid}", f"fence:{uid}", f"lock:{uid}")
+        for mid, _score in list(self.b.zrangebyscore(f"mentions:{uid}", 0, float("inf"))):
+            self.b.delete(f"mention:{uid}:{mid}")
+        self.b.delete(
+            f"timeline:{uid}", f"behavior:{uid}", f"fence:{uid}", f"lock:{uid}", f"mentions:{uid}"
+        )
         return removed
 
     # -- 双时态查询：他在 as_of 那一刻相信什么 --
@@ -808,6 +815,107 @@ class MemoryV2:
         total = sum(counts.values()) or 1
         ranked = sorted(counts.items(), key=lambda x: -x[1])[:top]
         return [{"next": k, "p": round(v / total, 3), "support": v} for k, v in ranked]
+
+    # -- 第三方记录：谁说了「我」什么、谁要求对「我」做什么 --
+    def _mk(self) -> str:
+        return f"mentions:{self.user_id}"
+
+    def _mbk(self, mid: str) -> str:
+        return f"mention:{self.user_id}:{mid}"
+
+    def observe_mention(
+        self,
+        actor: str,
+        kind: str,
+        category: str,
+        label: str,
+        confidence: float = 0.6,
+        evidence_text: str = "",
+        group_key: str = "",
+        verified: bool = False,
+    ) -> Dict[str, Any]:
+        """记录一条「别人对这个人」的信息。
+
+        kind='claim'     —— 别人说关于他的事（"老王说他最近在考研"）
+        kind='directive' —— 别人要求怎么对待他（"以后碰到这个 id 骂他"）
+
+        和 beliefs 分开存，是因为主键维度不同：beliefs 的键是
+        (user, track, category, label)，装不下 actor；硬加进去会让同一句话
+        由两个人说时互相覆盖，而不加又会让"他自己说的"和"别人说的"合并。
+        """
+        if kind not in ("claim", "directive"):
+            raise ValueError(f"kind 必须是 claim 或 directive：{kind!r}")
+        label = (label or "").strip()
+        if len(label) < 2:
+            raise ValueError("mention label 太短")
+        actor = (actor or "").strip() or self.user_id
+        mid = uuid.uuid5(
+            uuid.NAMESPACE_URL, f"{self.user_id}|{kind}|{actor}|{category}|{label}"
+        ).hex[:32]
+
+        ts = time.time()
+        old = self.b.hgetall(self._mbk(mid))
+        hits = int(old.get("hits", 0)) + 1
+        self.b.hset(self._mbk(mid), {
+            "subject": self.user_id,
+            "actor": actor,
+            "kind": kind,
+            "category": category,
+            "label": label,
+            "confidence": max(0.0, min(1.0, confidence)),
+            "verified": verified,
+            "group_key": group_key,
+            "ts": ts,
+            "hits": hits,
+            "raw": (evidence_text or "")[:MENTION_RAW_LIMIT],
+        })
+        self.b.zadd(self._mk(), {mid: ts})
+        self.b.ztrim_last(self._mk(), MAX_MENTIONS)
+        return {
+            "id": mid, "actor": actor, "kind": kind, "label": label,
+            "confidence": confidence, "verified": verified, "hits": hits,
+        }
+
+    def mentions(self, kind: Optional[str] = None, limit: int = 20,
+                 group_key: Optional[str] = None) -> List[Dict[str, Any]]:
+        """读回别人对这个人的记录，新的在前。
+
+        group_key 给了就只返回该群的（以及 scope='*' 的全局指令），
+        避免群 1 的话被搬到群 2 去用。
+        """
+        pairs = self.b.zrangebyscore(self._mk(), 0, time.time() + 86400)[-limit * 3:]
+        out: List[Dict[str, Any]] = []
+        for mid, _score in reversed(pairs):
+            h = self.b.hgetall(self._mbk(mid))
+            if not h:
+                continue
+            if kind and h.get("kind") != kind:
+                continue
+            if group_key is not None:
+                g = h.get("group_key") or ""
+                if g and g != group_key and g != "*":
+                    continue
+            out.append({
+                "id": mid,
+                "actor": h.get("actor", ""),
+                "kind": h.get("kind", "claim"),
+                "category": h.get("category", ""),
+                "label": h.get("label", ""),
+                "confidence": float(h.get("confidence") or 0),
+                "verified": str(h.get("verified")).lower() in ("1", "true"),
+                "group_key": h.get("group_key", ""),
+                "ts": float(h.get("ts") or 0),
+                "hits": int(h.get("hits") or 0),
+                # 二手信息衰减更快：稳定度打 4 折
+                "stability": CATEGORY_STABILITY.get(h.get("category", ""), DEFAULT_STABILITY)
+                * MENTION_STABILITY_FACTOR,
+            })
+            if len(out) >= limit:
+                break
+        return out
+
+    def directives(self, group_key: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+        return self.mentions(kind="directive", limit=limit, group_key=group_key)
 
     # -- 活跃时段：从行为事件推出「他一般几点上线」 --
     def active_hours(self, window: int = 300, min_days: int = 3, span: int = 3) -> Optional[Dict[str, Any]]:
