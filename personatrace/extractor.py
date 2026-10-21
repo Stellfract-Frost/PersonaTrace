@@ -142,9 +142,23 @@ Output JSON:
     "persona_updates": {{"identity":[],"traits":[],"interests":[],"style_notes":[],"decision_style":[],"interpersonal":[],"boundaries":[]}},
     "uncertain": [{{"label":"","confidence":0.0,"hint":""}}]
 }}"""
+    # 负向清单：只记"用户自己陈述的、稳定的事实"。写在这里而不是散在各处，
+    # 是因为抽错的东西会一直留在记忆里，而漏抽只是少一条。
+    NOT_RECORDED = """What NOT to record:
+- greetings, small talk, one-off reminders ("remind me in 10 minutes")
+- passing emotions ("I'm tired today") — record only if it repeats as a pattern
+- anything the assistant said about itself ("I will remember you") — the assistant's own
+  words are never evidence about the user
+- shared-experience claims that only one side can attest ("we solved it together")
+- duplicates of an existing fact; if this turn only restates something, return empty lists
+Only facts the USER stated (or that follow from behaviour over several turns) count.""" 
+
     def _build_extraction_prompt(self, user_msg: str, ai_reply: str, history_context: str, now: datetime, time_period: str) -> str:
         return f"""You are a user profile extraction assistant. Extract new information about the user from the current conversation turn.
 Current time: {now.strftime("%Y-%m-%d %H:%M:%S")} ({time_period})
+
+{self.NOT_RECORDED}
+
 ## Current Turn
 {history_context}
 User: {user_msg}
