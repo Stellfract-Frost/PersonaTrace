@@ -246,9 +246,6 @@ def test_pick_cross_category_backfills_when_short():
 # ---------------------------------------------------------------- 第三方记录
 
 
-# ---------------------------------------------------------------- 第三方记录
-
-
 def test_mention_claim_and_directive_are_separate():
     """别人说他的事 / 别人要求怎么对他，要分开取。"""
     m = MemoryV2(backend=MemoryBackend(), user_id="u:200")
