@@ -127,6 +127,12 @@ class MemoryBackend:
             for m, _ in ordered[: len(ordered) - keep]:
                 bucket.pop(m, None)
 
+    def zrem(self, key: str, *members: str) -> None:
+        with self._lock:
+            bucket = self._z.get(key, {})
+            for m in members:
+                bucket.pop(str(m), None)
+
     def zcard(self, key: str) -> int:
         with self._lock:
             return len(self._z.get(key, {}))
@@ -273,6 +279,13 @@ class SQLiteBackend:
                 (key, key, total - keep),
             )
 
+    def zrem(self, key: str, *members: str) -> None:
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "DELETE FROM t_zset WHERE key = ? AND member = ?",
+                [(key, str(m)) for m in members],
+            )
+
     def zcard(self, key: str) -> int:
         with self._lock:
             return self._conn.execute(
@@ -337,6 +350,10 @@ class RedisBackend:
         if n > keep:
             self.r.zremrangebyrank(self.p + key, 0, n - keep - 1)
 
+    def zrem(self, key: str, *members: str) -> None:
+        if members:
+            self.r.zrem(self.p + key, *members)
+
     def zcard(self, key: str) -> int:
         return int(self.r.zcard(self.p + key))
 
@@ -389,6 +406,9 @@ REINFORCE_K = 0.6        # 间隔效应增益系数
 MAX_EVIDENCE = 50        # 单条信条保留的原文证据上限（超出按 FIFO 淘汰并清理 L0）
 MAX_STABILITY_MULTIPLE = 20.0   # 稳定度最多涨到该类别初始值的 20 倍，防止变成"永不衰减"
 MAX_MENTIONS = 500              # 单个主体保留的第三方记录上限（超出按时间淘汰）
+EVIDENCE_RAW_LIMIT = 800        # 单条原文证据的字数上限（4000 会把整段聊天塞进去）
+GC_AT = 0.05                    # 保留率低于此值才允许回收
+GC_MAX_HITS = 1                 # 只被提过一次的才回收（重复出现过的留着）
 MENTION_RAW_LIMIT = 300         # 第三方记录里的原话上限
 MENTION_STABILITY_FACTOR = 0.4  # 二手信息失真快：稳定度打 4 折
 
@@ -627,7 +647,7 @@ class MemoryV2:
                 if evidence_text:
                     eid = evidence_id or f"{bid}:{int(ts * 1000)}"
                     self.b.hset(f"evidence:{self.user_id}:{eid}", {
-                        "belief_id": bid, "ts": ts, "raw_text": evidence_text[:4000],
+                        "belief_id": bid, "ts": ts, "raw_text": evidence_text[:EVIDENCE_RAW_LIMIT],
                     })
                     if eid not in belief.evidence:
                         belief.evidence.append(eid)
@@ -917,6 +937,36 @@ class MemoryV2:
     def directives(self, group_key: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
         return self.mentions(kind="directive", limit=limit, group_key=group_key)
 
+    def gc(self, dry_run: bool = False, threshold: float = GC_AT,
+           max_hits: int = GC_MAX_HITS) -> Dict[str, int]:
+        """回收「已经归档、且几乎不可能再被想起」的条目，连同原文证据。
+
+        归档只是不参与回忆，物理上还在长；这一步才是真正的删除。
+        条件故意保守：保留率低于 threshold **且** 从头到尾只被提过一次。
+        重复出现过的东西说明它在用户生活里占位置，不该被清掉。
+
+        dry_run=True 只统计不动手 —— doctor 默认走这个，避免误删。
+        """
+        now = time.time()
+        scanned = removed = evidence_rows = 0
+        for bid, _score in list(self.b.zrangebyscore(self._tl, 0, float("inf"))):
+            raw = self.b.hgetall(self._bk(bid))
+            if not raw:
+                continue
+            scanned += 1
+            belief = Belief.from_hash(raw)
+            if belief.retention_now(now) >= threshold or belief.hits > max_hits:
+                continue
+            removed += 1
+            evidence_rows += len(belief.evidence)
+            if dry_run:
+                continue
+            for eid in belief.evidence:
+                self.b.delete(f"evidence:{self.user_id}:{eid}")
+            self.b.delete(self._bk(bid))
+            self.b.zrem(self._tl, bid)
+        return {"scanned": scanned, "removed": removed, "evidence": evidence_rows}
+
     def overview(self) -> Dict[str, int]:
         """一眼看全：他自己的信条 / 别人说的 / 对他的指令。
 
@@ -924,9 +974,12 @@ class MemoryV2:
         和管理员的指令。给一个诚实的汇总，存储仍然是两张表。
         """
         rows = self.state(include_archived=True, include_invalidated=True)
+        live = self.state()
         mentions = self.mentions(limit=MAX_MENTIONS)
         return {
             "beliefs": len(rows),
+            "live": len(live),
+            "archived": max(0, len(rows) - len(live)),
             "claims": sum(1 for m in mentions if m.get("kind") == "claim"),
             "directives": sum(1 for m in mentions if m.get("kind") == "directive"),
         }

@@ -5,7 +5,8 @@
 一次跑给你看：后端选对了吗、写得进去吗、重启还在吗。
 
 用法：
-    personatrace-doctor
+    personatrace-doctor              # 只检查，不删东西
+    personatrace-doctor --gc         # 顺手回收「归档且只提过一次」的条目
     PERSONA_DB=D:/tmp/mem.db personatrace-doctor
 
 退出码：0 = 全通；1 = 有环节失败（会指出是哪一步）。
@@ -30,6 +31,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     argv = list(sys.argv[1:] if argv is None else argv)
     keep = "--keep" in argv
+    re_gc = "--gc" in argv
 
     print("PersonaTrace doctor")
     backend, mode = build_backend()
@@ -84,7 +86,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         _line("重启后读回", False, str(exc))
         ok = False
 
-    # 4) 清理
+    # 4) 归档与可回收
+    try:
+        ov = mem.overview()
+        plan = mem.gc(dry_run=True)
+        _line("归档情况", True,
+              f"活跃 {ov.get('live', 0)} / 归档 {ov.get('archived', 0)}，"
+              f"可回收 {plan.get('removed', 0)} 条")
+        if re_gc:
+            freed = mem.gc()
+            _line("回收", True, f"删除 {freed.get('removed', 0)} 条、"
+                               f"{freed.get('evidence', 0)} 条原文")
+    except Exception as exc:  # noqa: BLE001
+        _line("归档情况", False, str(exc))
+
+    # 5) 清理
     if not keep:
         try:
             mem.purge()

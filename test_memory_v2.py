@@ -377,7 +377,8 @@ def test_overview_counts_three_kinds():
     m.observe("goals", "在准备四级", track="work")
     m.observe_mention("u:1", "claim", "state", "别人说他很忙")
     m.observe_mention("u:9", "directive", "constraints", "碰到他就骂他")
-    assert m.overview() == {"beliefs": 1, "claims": 1, "directives": 1}
+    ov = m.overview()
+    assert (ov["beliefs"], ov["claims"], ov["directives"]) == (1, 1, 1)
 
 
 def test_overview_counts_three_kinds():
@@ -386,4 +387,77 @@ def test_overview_counts_three_kinds():
     m.observe("goals", "在准备四级", track="work")
     m.observe_mention("u:1", "claim", "state", "别人说他很忙")
     m.observe_mention("u:9", "directive", "constraints", "碰到他就骂他")
-    assert m.overview() == {"beliefs": 1, "claims": 1, "directives": 1}
+    ov = m.overview()
+    assert (ov["beliefs"], ov["claims"], ov["directives"]) == (1, 1, 1)
+
+
+def test_gc_reclaims_only_rare_old_beliefs():
+    """只回收「归档 + 只提过一次」的；经常提到的不动。"""
+    import time
+
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:207")
+    old = time.time() - 400 * 86400
+    m.observe("state", "很久以前提过一次", track="work", ts=old)
+    m.observe("goals", "经常提到的事", track="work", ts=old)
+    for _ in range(5):
+        m.observe("goals", "经常提到的事", track="work", ts=old + 86400)
+
+    assert m.gc(dry_run=True)["removed"] == 1        # 预演不删
+    assert len(m.state(include_archived=True)) == 2
+
+    freed = m.gc()
+    assert freed["removed"] == 1
+    assert [r["label"] for r in m.state(include_archived=True)] == ["经常提到的事"]
+
+
+def test_evidence_raw_text_is_capped():
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:208")
+    belief = m.observe("goals", "在准备四级", track="work", evidence_text="长" * 5000)
+    raw = m.b.hgetall(f"evidence:u:208:{belief.evidence[0]}")
+    assert len(raw["raw_text"]) == 800, len(raw["raw_text"])
+
+
+def test_overview_reports_archived():
+    import time
+
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:209")
+    m.observe("goals", "在准备四级", track="work")
+    m.observe("state", "旧事", track="work", ts=time.time() - 400 * 86400)
+    ov = m.overview()
+    assert ov["beliefs"] == 2 and ov["live"] == 1 and ov["archived"] == 1
+
+
+def test_gc_reclaims_only_rare_old_beliefs():
+    """只回收「归档 + 只提过一次」的；经常提到的不动。"""
+    import time
+
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:207")
+    old = time.time() - 400 * 86400
+    m.observe("state", "很久以前提过一次", track="work", ts=old)
+    m.observe("goals", "经常提到的事", track="work", ts=old)
+    for _ in range(5):
+        m.observe("goals", "经常提到的事", track="work", ts=old + 86400)
+
+    assert m.gc(dry_run=True)["removed"] == 1        # 预演不删
+    assert len(m.state(include_archived=True)) == 2
+
+    freed = m.gc()
+    assert freed["removed"] == 1
+    assert [r["label"] for r in m.state(include_archived=True)] == ["经常提到的事"]
+
+
+def test_evidence_raw_text_is_capped():
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:208")
+    belief = m.observe("goals", "在准备四级", track="work", evidence_text="长" * 5000)
+    raw = m.b.hgetall(f"evidence:u:208:{belief.evidence[0]}")
+    assert len(raw["raw_text"]) == 800, len(raw["raw_text"])
+
+
+def test_overview_reports_archived():
+    import time
+
+    m = MemoryV2(backend=MemoryBackend(), user_id="u:209")
+    m.observe("goals", "在准备四级", track="work")
+    m.observe("state", "旧事", track="work", ts=time.time() - 400 * 86400)
+    ov = m.overview()
+    assert ov["beliefs"] == 2 and ov["live"] == 1 and ov["archived"] == 1
