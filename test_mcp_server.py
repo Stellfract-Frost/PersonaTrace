@@ -11,14 +11,22 @@ import sys
 import pytest
 
 from personatrace import mcp_server
+from personatrace.intentions import IntentStore
 from personatrace.memory_v2 import MemoryBackend, MemoryV2
+from personatrace.merged_memory import MergedMemory
 
 
 @pytest.fixture(autouse=True)
 def fresh_mem():
     mcp_server._mem = MemoryV2(backend=MemoryBackend(), user_id="mcp_user")
+    mcp_server._merged = MergedMemory(
+        memory=MemoryV2(backend=MemoryBackend(), user_id="mcp_user"),
+        intents=IntentStore(":memory:", default_tz="Asia/Shanghai"),
+        user_id="mcp_user",
+    )
     yield
     mcp_server._mem = None
+    mcp_server._merged = None
 
 
 def call(name, **args):
@@ -46,7 +54,10 @@ def test_notification_has_no_response():
 def test_tools_list():
     resp = mcp_server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = {t["name"] for t in resp["result"]["tools"]}
-    assert names == {"memory_state", "memory_recall", "memory_observe", "memory_correct", "memory_predict"}
+    assert names == {
+        "memory_state", "memory_recall", "memory_observe", "memory_correct",
+        "memory_predict", "memory_remember", "memory_context", "memory_agenda",
+    }
     for t in resp["result"]["tools"]:
         assert t["inputSchema"]["type"] == "object"
 
@@ -86,6 +97,38 @@ def test_predict():
         m.record_behavior(k, "debug", ts=t + i)
     r = payload(call("memory_predict"))
     assert r["predictions"][0]["next"] == "app"
+
+
+
+
+def test_merged_remember_context_agenda():
+    now = "2026-10-23T10:00:00+08:00"
+    r = payload(call(
+        "memory_remember",
+        beliefs=[{"category": "identity", "label": "名字叫小陌", "confidence": 0.9}],
+        intentions=[{"action": "上课", "due": "后天", "importance": 0.9}],
+        now=now,
+    ))
+    assert r["beliefs"] == 1
+    assert r["intentions"] == 1
+
+    context = payload(call("memory_context", query="我那个 deadline 是几号", now=now))
+    assert context["agenda_lines"]
+    assert any("上课" in line for line in context["agenda_lines"])
+    assert any(row["label"] == "名字叫小陌" for row in context["pinned"])
+
+    agenda = payload(call("memory_agenda", now=now))
+    assert agenda["items"][0]["title"] == "上课"
+
+
+def test_merged_remember_source_gate():
+    r = payload(call(
+        "memory_remember",
+        beliefs=[{"category": "identity", "label": "名字叫小陌"}],
+        source="attention",
+    ))
+    assert r["status"] == "skipped"
+    assert payload(call("memory_context", query="名字"))["pinned"] == []
 
 
 def test_unknown_tool_and_method():
@@ -132,5 +175,5 @@ def test_stdio_end_to_end():
     lines = [json.loads(x) for x in proc.stdout.strip().splitlines() if x.strip()]
     assert len(lines) == 4                      # 通知不产生响应
     assert lines[0]["result"]["serverInfo"]["name"] == "personatrace-memory"
-    assert len(lines[1]["result"]["tools"]) == 5
+    assert len(lines[1]["result"]["tools"]) == 8
     assert json.loads(lines[3]["result"]["content"][0]["text"])["count"] == 1

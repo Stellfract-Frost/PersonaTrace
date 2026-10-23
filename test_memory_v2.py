@@ -112,6 +112,22 @@ def test_due_in_forward_looking(mem):
     assert row["needs_review"] is True        # 3 天内到期 → 提示复核
 
 
+def test_typed_time_roundtrip_and_preserve(mem):
+    now = time.time()
+    due = now + 2 * DAY
+    mem.observe("goals", "周五要演示", track="work", ts=now, due_at_ts=due,
+                time_kind="due", time_raw="周五")
+    row = mem.state(as_of=now)[0]
+    assert row["time_kind"] == "due"
+    assert row["time_raw"] == "周五"
+    assert abs(row["due_at_ts"] - due) < 1e-6
+
+    mem.observe("goals", "周五要演示", track="work", ts=now + 60)
+    row = mem.state(as_of=now + 60)[0]
+    assert row["time_kind"] == "due"
+    assert row["time_raw"] == "周五"
+
+
 def test_api_router():
     fastapi = pytest.importorskip("fastapi")
     httpx = pytest.importorskip("httpx")

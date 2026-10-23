@@ -5,39 +5,47 @@
 2. 整个协议本机要用到的只有 initialize / tools/list / tools/call / ping 四个方法，
    加起来不到 200 行，比引一个 SDK 更容易审。
 
-对外暴露四个工具（宿主模型自己决定什么时候调，不需要把画像全量塞进上下文）：
+对外暴露八个工具（宿主模型自己决定什么时候调，不需要把画像全量塞进上下文）：
   memory_state     → 此刻（或某个历史时刻）它认为你是什么状态
   memory_recall    → 按查询取用：约束与身份强制入选，其余按相关度×保持率排序
   memory_observe   → 写入一条观察（证据 + 结论），幂等
   memory_correct   → 失效一条结论（不删除，保留历史）
   memory_predict   → 根据行为序列预测下一步动作
+  memory_remember  → 写入已抽取的 beliefs / intentions（不调用 LLM）
+  memory_context   → 结构化读取：pinned / dated / related / cross / 短期任务
+  memory_agenda    → 只读短期任务议程
+
+协议层仍然零依赖；merged 工具按需加载 Pydantic + SQLite。
 
 契约硬化（插件第三条「失败不拖垮宿主」）：
   - 所有工具调用带超时，超时返回 isError 内容而不是抛异常；
   - 任何内部异常都转成工具结果里的错误文本，宿主只会看到"这条记忆没取到"，对话不受影响。
 
-启动：python mcp_server.py
+启动：personatrace-mcp / python -m personatrace.mcp_server
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
 try:  # 作为包导入：pip install 之后 / python -m personatrace.mcp_server
-    from .memory_v2 import MemoryV2
+    from .memory_v2 import DEFAULT_DB_PATH, MemoryV2
 except ImportError:  # 直接以脚本方式运行：python personatrace/mcp_server.py
-    from memory_v2 import MemoryV2  # type: ignore[no-redef]
+    from memory_v2 import DEFAULT_DB_PATH, MemoryV2  # type: ignore[no-redef]
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "personatrace-memory", "version": "1.1.0"}
+SERVER_INFO = {"name": "personatrace-memory", "version": "1.5.0"}
 DEFAULT_TIMEOUT = 8.0
 
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mcp_tool")
 _mem: Optional[MemoryV2] = None
+_merged = None
 
 
 def get_mem() -> MemoryV2:
@@ -45,6 +53,20 @@ def get_mem() -> MemoryV2:
     if _mem is None:
         _mem = MemoryV2()
     return _mem
+
+
+def get_merged():
+    """Lazy merged facade; SQLite by default, no Redis required."""
+    global _merged
+    if _merged is None:
+        try:
+            from .merged_memory import MergedMemory
+        except ImportError:
+            from merged_memory import MergedMemory  # type: ignore[no-redef]
+        db = os.environ.get("PERSONA_DB") or DEFAULT_DB_PATH
+        user_id = os.environ.get("PERSONA_USER_ID", "default")
+        _merged = MergedMemory(user_id=user_id, sqlite_path=db)
+    return _merged
 
 
 def _text(payload: Any, is_error: bool = False) -> Dict[str, Any]:
@@ -160,12 +182,51 @@ def _predict(args: Dict[str, Any]) -> Any:
     return {"predictions": get_mem().predict_next(int(args.get("window", 30)))}
 
 
+def _now_arg(args: Dict[str, Any]) -> Optional[datetime]:
+    value = args.get("now")
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value))
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _merged_remember(args: Dict[str, Any]) -> Any:
+    return get_merged().write(
+        args.get("beliefs") or [],
+        args.get("intentions") or [],
+        source=str(args.get("source") or "direct"),
+        now=_now_arg(args),
+    )
+
+
+def _merged_context(args: Dict[str, Any]) -> Any:
+    return get_merged().build_context(
+        str(args.get("query") or ""),
+        k=int(args.get("k", 4)),
+        now=_now_arg(args),
+    ).to_dict()
+
+
+def _merged_agenda(args: Dict[str, Any]) -> Any:
+    return get_merged().agenda(
+        now=_now_arg(args),
+        max_lines=int(args.get("max_lines", 6)),
+    )
+
+
 HANDLERS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "memory_state": _guarded(_state),
     "memory_recall": _guarded(_recall),
     "memory_observe": _guarded(_observe),
     "memory_correct": _guarded(_correct),
     "memory_predict": _guarded(_predict),
+    "memory_remember": _guarded(_merged_remember),
+    "memory_context": _guarded(_merged_context),
+    "memory_agenda": _guarded(_merged_agenda),
 }
 
 TOOLS = [
@@ -236,6 +297,73 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {"window": {"type": "integer", "default": 30}},
+        },
+    },
+    {
+        "name": "memory_remember",
+        "description": "写入已经抽取好的 beliefs / intentions。不调用 LLM；source 必须是 direct/bridge/console。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "beliefs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "category": {"type": "string"},
+                            "label": {"type": "string", "minLength": 2},
+                            "confidence": {"type": "number"},
+                            "reasoning": {"type": "string"},
+                            "evidence_text": {"type": "string"},
+                            "due": {"type": "string"},
+                        },
+                        "required": ["category", "label"],
+                    },
+                },
+                "intentions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "minLength": 2},
+                            "detail": {"type": "string"},
+                            "due": {"type": "string"},
+                            "ttl_hours": {"type": "number"},
+                            "importance": {"type": "number"},
+                            "confidence": {"type": "number"},
+                            "needs_confirmation": {"type": "boolean"},
+                            "recurrence": {"type": "string"},
+                        },
+                        "required": ["action"],
+                    },
+                },
+                "source": {"type": "string", "enum": ["direct", "bridge", "console"], "default": "direct"},
+                "now": {"type": ["number", "string"], "description": "UNIX 秒或 ISO；不传=现在"},
+            },
+        },
+    },
+    {
+        "name": "memory_context",
+        "description": "按查询返回结构化上下文：pinned / dated / related / cross / 短期任务。不拼 prompt，不改变 anti-nag 状态。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "k": {"type": "integer", "default": 4},
+                "now": {"type": ["number", "string"]},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "memory_agenda",
+        "description": "返回短期任务议程（due / importance / bucket / status）及隐藏条数，不改状态。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "max_lines": {"type": "integer", "default": 6},
+                "now": {"type": ["number", "string"]},
+            },
         },
     },
 ]

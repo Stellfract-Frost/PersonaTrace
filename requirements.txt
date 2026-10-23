@@ -1,14 +1,17 @@
-# 内核（memory_v2 / MCP server）零依赖，只用 Python 标准库：
-#   python mcp_server.py            # 直接可用，无需安装任何东西
+# The belief kernel and the legacy MCP tools use the Python standard library.
+# The merged facade (MergedMemory / memory_remember/context/agenda) uses
+# Pydantic and SQLite; install the package normally for those:
+#   pip install personatrace
 #
-# 需要额外能力时按组安装（见 pyproject.toml）：
-#   pip install "personatrace[llm]"      # LLMClient / 抽取管线（requests）
+# Optional capability groups:
+#   pip install "personatrace[llm]"      # LLMClient / extraction（requests）
 #   pip install "personatrace[vector]"   # chromadb + sentence-transformers + numpy
-#   pip install "personatrace[api]"      # FastAPI 层（api_v2.build_router）
+#   pip install "personatrace[api]"      # FastAPI layer
 #   pip install "personatrace[all]"
 #
-# 开发：
+# Development:
 #   pip install -e . && pip install pytest
 #
-# 说明：mem0 / python-pptx / python-docx / pypdf / openpyxl 只在旧版
-# file_loader 与 mem0 存储路径上用到，不再作为默认依赖，避免一次拖进 ~1GB 轮子。
+# mem0 / python-pptx / python-docx / pypdf / openpyxl stay optional: they are
+# only used by file_loader and the mem0 path, not by the memory kernel.
+pydantic>=2.0

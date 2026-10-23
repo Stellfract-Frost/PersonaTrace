@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 # 轻量、无外部依赖的成员（导入本包时不触发 chromadb / requests）
 from .config import PersonaConfig
@@ -38,7 +38,15 @@ from .models import (
 _LAZY = {
     "MemoryV2": ".memory_v2",
     "MemoryBackend": ".memory_v2",
+    "SQLiteBackend": ".memory_v2",
     "Belief": ".memory_v2",
+    "MergedMemory": ".merged_memory",
+    "ContextPack": ".merged_memory",
+    "IntentStore": ".intentions",
+    "IntentExtractor": ".intent_extractor",
+    "GraphStore": ".graph_memory",
+    "parse_due": ".schema",
+    "rank": ".recall",
     "LLMClient": ".llm_client",
     "extract_json": ".llm_client",
     "SimilarityCalculator": ".similarity",

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "personatrace"
-version = "1.4.0"
-description = "A memory layer that knows what still holds: time-aware beliefs with retention decay, dual temporal queries and evidence-backed retrieval."
+version = "1.5.0"
+description = "A memory layer for what is still true, what is due, and why it was stored."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -13,14 +13,14 @@ license-files = ["LICENSE"]
 authors = [{ name = "Stellfract-Frost" }]
 keywords = [
   "memory", "llm", "mcp", "mcp-server", "agent", "user-profile",
-  "long-term-memory", "ebbinghaus", "temporal", "astrbot",
+  "long-term-memory", "temporal", "retrieval", "intentions", "sqlite",
 ]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Operating System :: OS Independent",
 ]
-# 内核零依赖：memory_v2 只用标准库
-dependencies = []
+# The belief kernel uses the standard library; the merged facade uses Pydantic.
+dependencies = ["pydantic>=2.0"]
 
 [project.optional-dependencies]
 llm = ["requests>=2.28.0"]

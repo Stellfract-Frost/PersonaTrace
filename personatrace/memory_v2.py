@@ -457,6 +457,8 @@ class Belief:
     dimension: str = "identity"          # identity | need | predict
     reasoning: str = ""                  # 为什么存这条（深读时要带回去的语境）
     due_at_ts: Optional[float] = None    # 前瞻：这件事还有多久到期
+    time_kind: str = "none"              # none | due | past | range | recurring
+    time_raw: str = ""                   # 原话，回填错了能查、能回滚
     version: int = 0
     evidence: List[str] = field(default_factory=list)
 
@@ -476,6 +478,8 @@ class Belief:
             "invalid_at_ts": self.invalid_at_ts if self.invalid_at_ts else "",
             "status": self.status, "hits": self.hits, "dimension": self.dimension,
             "due_at_ts": self.due_at_ts if self.due_at_ts else "",
+            "time_kind": self.time_kind or "none",
+            "time_raw": self.time_raw,
             "reasoning": self.reasoning,
             "version": self.version, "evidence": json.dumps(self.evidence, ensure_ascii=False),
         }
@@ -500,7 +504,10 @@ class Belief:
             status=raw.get("status", "active"), hits=int(num("hits", 1)),
             dimension=raw.get("dimension", "identity"),
             reasoning=raw.get("reasoning", ""),
-            due_at_ts=num("due_at_ts") or None, version=int(num("version", 0)),
+            due_at_ts=num("due_at_ts") or None,
+            time_kind=raw.get("time_kind", "none") or "none",
+            time_raw=raw.get("time_raw", ""),
+            version=int(num("version", 0)),
             evidence=json.loads(raw.get("evidence") or "[]"),
         )
 
@@ -601,6 +608,8 @@ class MemoryV2:
         reasoning: str = "",
         evidence_text: str = "",
         due_at_ts: Optional[float] = None,
+        time_kind: str = "none",
+        time_raw: str = "",
         ts: Optional[float] = None,
     ) -> Belief:
         ts = ts if ts is not None else time.time()
@@ -633,6 +642,10 @@ class MemoryV2:
                         belief.reasoning = reasoning
                     if due_at_ts:
                         belief.due_at_ts = due_at_ts
+                    if time_kind and time_kind != "none":
+                        belief.time_kind = time_kind
+                    if time_raw:
+                        belief.time_raw = time_raw
                 else:
                     belief = Belief(
                         id=bid, user_id=self.user_id, track=track, category=category,
@@ -640,7 +653,7 @@ class MemoryV2:
                         stability=CATEGORY_STABILITY.get(category, DEFAULT_STABILITY),
                         last_support_ts=ts, valid_from_ts=ts,
                         dimension=dimension, reasoning=reasoning,
-                        due_at_ts=due_at_ts,
+                        due_at_ts=due_at_ts, time_kind=time_kind, time_raw=time_raw,
                         evidence=[evidence_id] if evidence_id else [],
                     )
                 # L0：原文只存一次，检索时不碰它（这是成本优势的来源）
@@ -805,6 +818,9 @@ class MemoryV2:
             "effective_confidence": round(belief.confidence * r, 3),
             "staleness": stale,          # 距上次支撑 / 稳定度，>1 表示已过半个周期以上
             "due_in": due_in,            # 前瞻：还有几天到期（负数=已超期）
+            "due_at_ts": belief.due_at_ts,
+            "time_kind": belief.time_kind,
+            "time_raw": belief.time_raw,
             "hits": belief.hits,
             "evidence": belief.evidence[-5:],
             "needs_review": r < 0.5 or (due_in is not None and due_in < 3),

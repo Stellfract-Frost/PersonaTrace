@@ -30,6 +30,8 @@ class ObserveIn(BaseModel):
     reasoning: str = Field("", description="为什么存这条（深读时作为语境带回）")
     evidence_text: str = Field("", description="原始语句片段，落 L0，检索时不参与打分")
     due_at_ts: Optional[float] = Field(None, description="UNIX 秒；用于前瞻'还有几天'")
+    time_kind: str = Field("none", pattern="^(none|due|past|range|recurring)$")
+    time_raw: str = Field("", description="时间原话，便于回填/回滚")
     ts: Optional[float] = None
 
 
@@ -50,6 +52,9 @@ class BeliefOut(BaseModel):
     effective_confidence: float
     staleness: float
     due_in: Optional[float]
+    due_at_ts: Optional[float] = None
+    time_kind: str = "none"
+    time_raw: str = ""
     hits: int
     evidence: List[str]
     needs_review: bool
@@ -84,7 +89,8 @@ def build_router(mem: MemoryV2) -> APIRouter:
             track=payload.track, confidence=payload.confidence,
             evidence_id=payload.evidence_id, dimension=payload.dimension,
             reasoning=payload.reasoning, evidence_text=payload.evidence_text,
-            due_at_ts=payload.due_at_ts, ts=payload.ts,
+            due_at_ts=payload.due_at_ts, time_kind=payload.time_kind,
+            time_raw=payload.time_raw, ts=payload.ts,
         )
         return {
             "id": belief.id,

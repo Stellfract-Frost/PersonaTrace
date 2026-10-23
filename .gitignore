@@ -6,3 +6,6 @@ dist/
 persona_data/
 .pytest_cache/
 _data/
+.claude/
+.workbuddy/
+.ruff_cache/
