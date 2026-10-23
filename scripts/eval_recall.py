@@ -1,6 +1,6 @@
 """Offline recall evaluation for the merged retrieval layer.
 
-Fixture: 12 beliefs, 10 queries. Metrics: recall@3 and MRR.
+Fixture: 200 beliefs, 50 queries. Metrics: recall@3 and MRR.
 
 The point is not to reproduce the 92.3% number from the design doc; that number
 came from a different integration. This script gives PersonaTrace its own
@@ -43,64 +43,37 @@ NOW = datetime(2026, 10, 23, 10, 0, tzinfo=Z)
 # Fixture
 # ---------------------------------------------------------------------------
 
-def _epoch(day: int, hour: int = 23, minute: int = 59) -> float:
-    return datetime(2026, 10, day, hour, minute, tzinfo=Z).timestamp()
+try:
+    from scripts.eval_data_200 import BELIEFS, LABEL_SET, QUERIES
+except ImportError:  # `python scripts/eval_recall.py`
+    from eval_data_200 import BELIEFS, LABEL_SET, QUERIES
 
-
-BELIEFS = [
-    # id, category, label, due_at, time_kind, time_raw
-    ("c", "goals", "周五要演示", _epoch(23), "due", "周五"),
-    ("d", "constraints", "下周三交周报", _epoch(28), "due", "下周三"),
-    ("r", "goals", "年底前换工作", datetime(2026, 12, 31, 23, 59, tzinfo=Z).timestamp(), "range", "年底前"),
-    ("tired", "state", "这周比较累", None, "none", ""),
-    ("agent", "projects", "在赶 agent 项目", None, "none", ""),
-    ("night", "state", "熬夜到两点", None, "none", ""),
-    ("name", "identity", "名字叫小陌", None, "none", ""),
-    ("peanut", "constraints", "对花生过敏", None, "none", ""),
-    ("hz", "explicit_facts", "住在杭州", None, "none", ""),
-    ("fullname", "dislikes", "讨厌被叫全名", None, "none", ""),
-    ("backend", "expertise", "写后端", None, "none", ""),
-    ("short", "style_notes", "说话很短", None, "none", ""),
-]
-
-QUERIES = [
-    ("我那个 deadline 是几号", {"c", "d"}),
-    ("接下来有什么安排", {"c", "d", "r"}),
-    ("我平时几点睡", {"night"}),
-    ("我住哪儿", {"hz"}),
-    ("该怎么称呼他", {"name", "fullname"}),
-    ("我对什么过敏", {"peanut"}),
-    ("agent 项目怎么样了", {"agent", "c"}),
-    ("我做什么方向", {"backend"}),
-    ("我最近状态怎么样", {"tired", "night"}),
-    ("我年底有什么打算", {"r"}),
-]
-
-ID_TO_LABEL = {bid: label for bid, _category, label, _due, _kind, _raw in BELIEFS}
-EXPECTED_LABELS = {
-    query: {ID_TO_LABEL[bid] for bid in expected}
-    for query, expected in QUERIES
+PERSONA_CATEGORIES = {
+    "identity", "traits", "interests", "style_notes", "behavior_patterns",
+    "decision_style", "interpersonal", "boundaries", "habit", "state",
 }
 
 
 def build_rows() -> List[Dict]:
     mem = MemoryV2(backend=MemoryBackend(), user_id="eval")
-    for bid, category, label, due, kind, raw in BELIEFS:
+    for category, label, due, kind, raw in BELIEFS:
         mem.observe(
-            category, label, track="work" if category not in ("identity", "state", "style_notes") else "persona",
+            category, label,
+            track="persona" if category in PERSONA_CATEGORIES else "work",
             confidence=0.85, due_at_ts=due, time_kind=kind, time_raw=raw,
             ts=NOW.timestamp(),
         )
-        # observe() derives the id; map the fixture id through the label.
+
     by_label = {row["label"]: row for row in mem.state(as_of=NOW.timestamp(), expand=1)}
+    missing = LABEL_SET - set(by_label)
+    if missing:
+        raise AssertionError(f"fixture rows missing after observe: {sorted(missing)[:5]}")
     rows = []
-    for bid, _category, label, _due, _kind, _raw in BELIEFS:
-        row = by_label.get(label)
-        if row is None:
-            continue
-        row = dict(row)
-        row["fixture_id"] = bid
+    for _category, label, _due, _kind, _raw in BELIEFS:
+        row = dict(by_label[label])
         rows.append(row)
+    if len(rows) != 200:
+        raise AssertionError(f"expected 200 rows, got {len(rows)}")
     return rows
 
 
@@ -208,8 +181,8 @@ def score_method(rows, embed_fn, method) -> Dict[str, float]:
     recalls = []
     rr = []
     details = []
-    for query, expected_ids in QUERIES:
-        expected = EXPECTED_LABELS[query]
+    for query, expected_labels in QUERIES:
+        expected = expected_labels
         got = method(rows, query, embed_fn)
         top = got[:3]
         hit = expected & set(top)
@@ -221,6 +194,8 @@ def score_method(rows, embed_fn, method) -> Dict[str, float]:
                 break
         rr.append(reciprocal)
         details.append((query, expected, top, reciprocal))
+    if not recalls:
+        raise AssertionError("no queries scored")
     return {
         "recall@3": sum(recalls) / len(recalls),
         "mrr": sum(rr) / len(rr),

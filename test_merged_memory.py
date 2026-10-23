@@ -168,3 +168,33 @@ def test_hidden_hint_survives_truncation():
     assert "另有" in text
     assert "memory_recall" in text
     assert len(text) >= 20
+
+def test_write_dedups_paraphrased_preference():
+    mm = make([])
+    mm.write(beliefs=[{"category": "likes", "label": "喜欢深色主题"}], now=NOW)
+    mm.write(beliefs=[{"category": "likes", "label": "偏好深色主题"}], now=NOW)
+
+    rows = mm.memory.state(as_of=NOW.timestamp())
+    assert [(row["label"], row["hits"]) for row in rows] == [("喜欢深色主题", 2)]
+
+
+def test_write_dedups_possessive_variant():
+    mm = make([])
+    mm.write(beliefs=[{"category": "identity", "label": "名字叫小陌"}], now=NOW)
+    mm.write(beliefs=[{"category": "identity", "label": "我的名字叫小陌"}], now=NOW)
+    assert [row["label"] for row in mm.memory.state(as_of=NOW.timestamp())] == ["名字叫小陌"]
+
+
+def test_write_does_not_merge_different_deadlines():
+    mm = make([])
+    mm.write(beliefs=[{"category": "goals", "label": "周五要演示", "due": "周五"}], now=NOW)
+    mm.write(beliefs=[{"category": "goals", "label": "下周三演示", "due": "下周三"}], now=NOW)
+    assert len(mm.memory.state(as_of=NOW.timestamp())) == 2
+
+
+def test_write_does_not_merge_similar_but_different_labels():
+    mm = make([])
+    mm.write(beliefs=[{"category": "likes", "label": "喜欢猫"}], now=NOW)
+    mm.write(beliefs=[{"category": "likes", "label": "喜欢猫毛"}], now=NOW)
+    assert len(mm.memory.state(as_of=NOW.timestamp())) == 2
+

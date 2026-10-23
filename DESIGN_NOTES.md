@@ -28,25 +28,28 @@ put `周五` into a typed field.
 
 ## 2. Measure first
 
-Fixture: 12 beliefs, 10 queries, 3 of them time-related. Metrics: recall@3 and
-MRR. All methods use the same rows and the same embedding model. This is a
-directional gate, not a statistically meaningful benchmark.
+Fixture: 200 beliefs, 50 queries, with distractor clusters and several
+time-intent questions. Metrics: recall@3 and MRR. All methods use the same rows
+and the same embedding model. This is a directional gate, not a statistically
+meaningful benchmark.
 
 Local run with `BAAI/bge-small-zh-v1.5`:
 
 | Method | recall@3 | MRR |
 |---|---|---|
-| v2 native, no pinned | 35.0% | 0.333 |
-| v2 native, pinned | 23.3% | 0.283 |
-| v1 string only | 53.3% | 0.583 |
-| v1 + bge | 76.7% | 0.833 |
-| outer lexical | 56.7% | 0.600 |
-| outer + bge | 76.7% | 0.833 |
-| **outer + bge + time facet** | **90.0%** | **0.933** |
+| v2 native, no pinned | 2.0% | 0.020 |
+| v2 native, pinned | 2.0% | 0.020 |
+| v1 string only | 61.0% | 0.657 |
+| v1 + bge | 73.0% | 0.737 |
+| outer lexical | 61.0% | 0.637 |
+| outer + bge | 74.0% | 0.770 |
+| **outer + bge + time facet** | **76.0%** | **0.760** |
 
-The important comparison is not 90% against 100%. It is 76.7% → 90.0%: the
-gain comes from routing time questions to a time slot, not from a better
-embedding.
+The earlier 12/10 fixture scored 90.0%. That number was too easy: 12 rows and
+10 queries gave the time bucket almost no distractors. On 200/50, the gain from
+the time facet is +2.0 points recall but -0.010 MRR: the bucket can promote a
+correct due item above an equally correct semantic item. Both numbers are real;
+the larger fixture is the one to quote.
 
 ## 3. What changed
 
@@ -131,6 +134,22 @@ can store beliefs and intentions in one SQLite file.
 `direct / bridge / console`. A proactive turn (`attention`) must not write
 memory; otherwise the assistant's own words become "facts about the user."
 
+### 3.8 Conservative write-time dedup
+
+`MemoryV2` is idempotent only when the label is exactly the same. v1 merged
+similar labels through embeddings; the merged facade does a smaller, explicit
+check before writing:
+
+- normalize possessives and common intensifiers;
+- normalize a few synonym pairs (`偏好 → 喜欢`, `在赶 → 在做`);
+- compare labels in the same category with `SequenceMatcher` at `>= 0.86`;
+- never merge two items with different typed time slots.
+
+This catches `喜欢深色主题` / `偏好深色主题` and `名字叫小陌` / `我的名字叫小陌`,
+while keeping `喜欢猫` / `喜欢猫毛` and `周五要演示` / `下周三演示` separate. It
+does not create an alias table: a low-lexical-overlap paraphrase can still
+produce a second record.
+
 ## 4. Pitfalls (the useful part)
 
 1. **A single `due` float is not a time model.** It cannot carry past,
@@ -155,9 +174,10 @@ memory; otherwise the assistant's own words become "facts about the user."
     two confidences and an unexplainable rank.
 11. **Read raw Chroma rows for migration.** `PersonaManager.load()` applies the
     old decay before migration; that would decay twice.
-12. **Label idempotency is a tradeoff.** `uuid5(user:...:label)` deduplicates
-    repeated labels but creates a second record for a paraphrase. The merge
-    does not change that primary key.
+12. **Label idempotency is not semantic dedup.** `uuid5(user:...:label)`
+    deduplicates repeated labels; the merged write path adds a conservative
+    lexical check. It is not an alias table, so a low-overlap paraphrase can
+    still create a second record.
 13. **Pydantic retries need the error text.** Retrying with the same prompt just
     repeats the same invalid JSON. Feed the `ValidationError` back.
 14. **An unparseable due must not become a 24h TTL.** Skip it or ask; do not
@@ -168,16 +188,17 @@ memory; otherwise the assistant's own words become "facts about the user."
     body. Otherwise the model sees a partial list and no "there is more" signal.
 17. **SQLite key prefixes and TTL are easy to double-prefix.** Test restart and
     expiry, not just inserts.
-18. **The eval set is tiny.** 10 queries can validate a direction; it cannot
-    support "23 points better" as a statistical claim.
+18. **Fifty queries are still small.** The 200/50 fixture is harder than the
+    original 12/10 one, but it cannot support a claim like "23 points better"
+    without a held-out set.
 
 ## 5. Deliberately not done
 
 - no UI, persona or proactive messaging;
 - no multi-tenant/auth model;
 - no graph unification of beliefs and intentions yet;
-- no near-duplicate merge; the label key stays stable;
-- no 50+ query benchmark or CI gate;
+- no full semantic alias merge; dedup is lexical and conservative;
+- no 100+ query benchmark or CI gate;
 - no Redis requirement; SQLite is enough for a local single user.
 
 ## 6. Reproduce

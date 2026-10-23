@@ -15,8 +15,10 @@ a deadline.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from difflib import SequenceMatcher
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -51,6 +53,56 @@ def _aware(now: Optional[datetime], tz: str) -> datetime:
     if now.tzinfo is None:
         return now.replace(tzinfo=_zone(tz))
     return now.astimezone(_zone(tz))
+
+
+# Conservative write-time dedup. Exact labels are already idempotent in
+# MemoryV2; this catches only near-identical paraphrases. It is lexical on
+# purpose: it must work without an embedding model and it must not collapse
+# two different commitments that happen to share a verb.
+_DEDUP_THRESHOLD = 0.86
+_DEDUP_SYNONYMS = (
+    ("偏好", "喜欢"),
+    ("比较", ""),
+    ("很", ""),
+    ("正在", "在"),
+    ("在赶", "在做"),
+)
+
+
+def _normalize_label(label: str) -> str:
+    text = (label or "").strip().lower()
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"^[我的]+", "", text)
+    for old, new in _DEDUP_SYNONYMS:
+        text = text.replace(old, new)
+    return text
+
+
+def _label_similarity(a: str, b: str) -> float:
+    left, right = _normalize_label(a), _normalize_label(b)
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    return SequenceMatcher(None, left, right).ratio()
+
+
+def _time_compatible(
+    a_due: Optional[float],
+    a_kind: str,
+    b_due: Optional[float],
+    b_kind: str,
+) -> bool:
+    """A paraphrase may merge only when it points at the same time slot."""
+    a_kind = a_kind or "none"
+    b_kind = b_kind or "none"
+    if a_kind != b_kind:
+        return False
+    if a_kind == "none":
+        return True
+    if a_due is None or b_due is None:
+        return False
+    return abs(float(a_due) - float(b_due)) <= 86400.0
 
 
 def _clamp(value: Any, default: float = 0.5) -> float:
@@ -302,8 +354,35 @@ Return JSON only:
   ]
 }}"""
 
+    def _existing_belief_index(self, now: datetime) -> Dict[tuple, List[Dict[str, Any]]]:
+        index: Dict[tuple, List[Dict[str, Any]]] = {}
+        for row in self.memory.state(as_of=now.timestamp(), expand=0):
+            key = (row.get("track", "work"), row.get("category", ""))
+            index.setdefault(key, []).append(row)
+        return index
+
+    def _find_dedup(
+        self,
+        index: Dict[tuple, List[Dict[str, Any]]],
+        item: BeliefIn,
+        track: str,
+        due_ts: Optional[float],
+        time_kind: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return an existing belief that is the same proposition, if any."""
+        for row in index.get((track, item.category), []):
+            if not _time_compatible(
+                due_ts, time_kind,
+                row.get("due_at_ts"), row.get("time_kind", "none"),
+            ):
+                continue
+            if _label_similarity(item.label, row.get("label", "")) >= _DEDUP_THRESHOLD:
+                return row
+        return None
+
     def _write_beliefs(self, beliefs: List[BeliefIn], user_msg: str, now: datetime) -> List[Any]:
         written = []
+        index = self._existing_belief_index(now)
         for draft in beliefs[:4]:
             item = coerce_in(draft)
             if item is None:
@@ -312,10 +391,13 @@ Return JSON only:
             due_ts = typed.due_ts if typed else None
             time_kind = typed.kind if typed else "none"
             time_raw = typed.raw if typed else (item.due or "")
+            track = item.track or track_for(item.category)
+            match = self._find_dedup(index, item, track, due_ts, time_kind)
+            label = match["label"] if match else item.label
             try:
-                written.append(self.memory.observe(
-                    item.category, item.label,
-                    track=item.track or track_for(item.category),
+                belief = self.memory.observe(
+                    item.category, label,
+                    track=track,
                     confidence=item.confidence,
                     reasoning=item.reasoning,
                     evidence_text=item.evidence_text or user_msg[:4000],
@@ -323,7 +405,16 @@ Return JSON only:
                     time_kind=time_kind,
                     time_raw=time_raw,
                     ts=now.timestamp(),
-                ))
+                )
+                written.append(belief)
+                if match is None:
+                    index.setdefault((track, item.category), []).append({
+                        "label": belief.label,
+                        "track": belief.track,
+                        "category": belief.category,
+                        "due_at_ts": belief.due_at_ts,
+                        "time_kind": belief.time_kind,
+                    })
             except Exception:
                 logger.warning("belief write failed: %s", item.label, exc_info=True)
         return written

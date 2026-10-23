@@ -112,18 +112,19 @@ memory_predict / memory_remember / memory_context / memory_agenda`。
 
 ## 评测
 
-12 条信条、10 条查询，只看方向，不当统计结论：
+200 条信条、50 条查询，只看方向，不当统计结论。之前 12/10 的 90.0% 太容易：
 
 ```text
-v2 native (no pinned)      35.0% / 0.333
-v2 native (pinned)         23.3% / 0.283
-v1 string                  53.3% / 0.583
-v1 + bge                   76.7% / 0.833
-outer + bge                76.7% / 0.833
-outer + bge + time facet   90.0% / 0.933
+v2 native (no pinned)       2.0% / 0.020
+v2 native (pinned)          2.0% / 0.020
+v1 string                  61.0% / 0.657
+v1 + bge                   73.0% / 0.737
+outer + bge                74.0% / 0.770
+outer + bge + time facet   76.0% / 0.760
 ```
 
-真正有价值的是 `outer + bge` → `+ time facet`：提升来自 typed time，不是换模型。
+`outer + bge` → `+ time facet`：recall +2.0，MRR -0.010。时间桶可能把一条正确的
+due 记录排到同样正确的语义记录前面；引用大 fixture 的数字。
 
 ```bash
 python scripts/eval_recall.py
@@ -145,10 +146,13 @@ python scripts/eval_recall.py
 | 17 类 belief + 中文 typed time | 已发布 |
 | 外层检索 + 时间桶 + 跨类别 | 已发布 |
 | 短期 intention：importance / TTL / anti-nag | 已发布 |
+| 保守的词面去重 | 已发布 |
 | `MergedMemory` + MCP | 已发布（M2） |
 | v1 → v2 迁移脚本 | 有；默认 dry-run |
 | graph memory | 实验性，未接默认检索 |
 | `PersonaManager` 默认切到合并路径 | 未做（M3） |
+
+去重是词面且保守的；低重叠的复述仍可能产生第二条记录。50 条查询也仍然是小样本。
 
 明确不做：UI、人格、主动消息、多租户、聊天平台插件本体。
 

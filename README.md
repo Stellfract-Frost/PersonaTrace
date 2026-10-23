@@ -131,21 +131,22 @@ See [MCP.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/MCP.md).
 
 ## Evaluation
 
-A 12-belief, 10-query fixture is included. It is a directional gate, not a
-benchmark.
+A 200-belief, 50-query fixture is included. It is a directional gate, not a
+benchmark. The earlier 12/10 fixture scored 90.0%; it was too easy.
 
 ```text
 method                      recall@3     MRR
-v2 native (no pinned)           35.0%   0.333
-v2 native (pinned)              23.3%   0.283
-v1 string                       53.3%   0.583
-v1 + bge                        76.7%   0.833
-outer + bge                     76.7%   0.833
-outer + bge + time facet        90.0%   0.933
+v2 native (no pinned)            2.0%   0.020
+v2 native (pinned)               2.0%   0.020
+v1 string                       61.0%   0.657
+v1 + bge                        73.0%   0.737
+outer + bge                     74.0%   0.770
+outer + bge + time facet        76.0%   0.760
 ```
 
-The useful comparison is `outer + bge` → `+ time facet`: the gain comes from
-typed time, not from a stronger embedding.
+The useful comparison is `outer + bge` → `+ time facet`: +2.0 recall but
+-0.010 MRR. The time bucket can promote a due item above an equally correct
+semantic item. The larger fixture is the number to quote.
 
 ```bash
 python scripts/eval_recall.py
@@ -168,6 +169,7 @@ The temporal kernel is described in
 | 17-category belief contract + Chinese typed time | shipped |
 | outer retrieval + time facet + cross-category | shipped |
 | short-term intentions with importance / TTL / anti-nag | shipped |
+| conservative write-time dedup | shipped |
 | `MergedMemory` facade + MCP tools | shipped (M2) |
 | v1 → v2 migration script | shipped; dry-run by default |
 | graph memory | experimental, not wired into default retrieval |
@@ -177,8 +179,8 @@ Known limits:
 
 - single user; no multi-tenant or auth;
 - no UI, persona, or proactive messaging;
-- label-keyed beliefs still create a second record for a paraphrase;
-- the evaluation set is small;
+- dedup is lexical and conservative; a low-overlap paraphrase can still create a second record;
+- 50 queries are still a small evaluation set;
 - `PersonaManager` remains the legacy v1 pipeline; use `MergedMemory` or MCP
   for the merged path.
 
