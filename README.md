@@ -6,8 +6,8 @@
 
 **A memory layer for what is still true, what is due, and why it was stored.**
 
-PersonaTrace is not a chatbot, an AstrBot plugin, or an agent harness. It is a
-small memory kernel that a host can call. The host owns the model, the prompt,
+PersonaTrace is not a chatbot or an agent harness. It is a small memory kernel
+that a host can call. The host owns the model, the prompt,
 the UI, the tone, and any proactive behavior.
 
 The unit of memory is not a fact. It is **a fact that holds for a while**:

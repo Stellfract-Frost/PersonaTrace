@@ -8,7 +8,7 @@
 
 [English](README.md)
 
-PersonaTrace 不是聊天机器人，不是 AstrBot 插件，也不是 agent harness。
+PersonaTrace 不是聊天机器人，也不是 agent harness。
 它只做记忆：宿主负责模型、prompt、UI、语气和主动行为。
 
 记忆的单位不是「事实」，而是**在某段时间内成立的事实**：有生效时间、保持率、
@@ -150,8 +150,7 @@ python scripts/eval_recall.py
 | graph memory | 实验性，未接默认检索 |
 | `PersonaManager` 默认切到合并路径 | 未做（M3） |
 
-明确不做：UI、人格、主动消息、多租户、AstrBot 插件本体。
-这个仓库不是 AstrBot 插件；插件在独立仓库，不属于这个包。
+明确不做：UI、人格、主动消息、多租户、聊天平台插件本体。
 
 ## License
 
