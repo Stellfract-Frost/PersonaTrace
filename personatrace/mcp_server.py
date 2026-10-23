@@ -40,7 +40,7 @@ except ImportError:  # 直接以脚本方式运行：python personatrace/mcp_ser
     from memory_v2 import DEFAULT_DB_PATH, MemoryV2  # type: ignore[no-redef]
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "personatrace-memory", "version": "1.5.0"}
+SERVER_INFO = {"name": "personatrace-memory", "version": "1.5.1"}
 DEFAULT_TIMEOUT = 8.0
 
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mcp_tool")

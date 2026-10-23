@@ -57,12 +57,6 @@ pip install personatrace
 pip install "personatrace[llm,vector]"
 ```
 
-Until 1.5.0 is available on PyPI, install the merged API from source:
-
-```bash
-pip install "git+https://github.com/Stellfract-Frost/PersonaTrace.git"
-```
-```
 
 Python 3.10+. The core belief kernel uses the standard library. The merged
 facade uses Pydantic; the default local store is SQLite. Redis is optional.

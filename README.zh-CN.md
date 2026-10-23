@@ -55,12 +55,6 @@ pip install personatrace
 pip install "personatrace[llm,vector]"   # 可选：LLM / embedding
 ```
 
-1.5.0 上 PyPI 之前，合并 API 先从源码安装：
-
-```bash
-pip install "git+https://github.com/Stellfract-Frost/PersonaTrace.git"
-```
-
 Python 3.10+。belief 内核只用标准库；合并 facade 用 Pydantic；默认 SQLite，
 不需要 Redis。
 
