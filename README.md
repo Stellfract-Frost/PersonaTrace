@@ -2,174 +2,184 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![MCP](https://img.shields.io/badge/MCP-ready-4B5563)](MCP.md)
+[![MCP](https://img.shields.io/badge/MCP-ready-4B5563)](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/MCP.md)
 
-**A memory layer that says how long something is still good for.**
+**A memory layer for what is still true, what is due, and why it was stored.**
 
-[中文说明](README.zh-CN.md) · [AstrBot plugin](https://github.com/Stellfract-Frost/astrbot_plugin_personatrace)
+PersonaTrace is not a chatbot, an AstrBot plugin, or an agent harness. It is a
+small memory kernel that a host can call. The host owns the model, the prompt,
+the UI, the tone, and any proactive behavior.
 
-Most memory layers answer *"is this still true?"* — a question about the past. Useful when you are writing a summary, useless when you are planning next week.
+The unit of memory is not a fact. It is **a fact that holds for a while**:
+it has a validity window, a retention curve, evidence, and optionally a due
+date. A separate intention store handles one-off commitments whose lifetime is
+measured in hours or days, not in months.
 
-The question that changes a decision is *"how long is this still good for?"* So every belief carries `due_in`: two days left, overdue by a week. An agent can act on that. It cannot act on "true since March".
+## What it remembers
 
-Models have no sense of time. They will happily treat a preference you dropped in July as current, keep both sides of a contradiction, and never tell you which sentence a conclusion came from. One turn hides it. Weeks of planning exposes it.
-
-So the unit here is not a fact. It is **a fact that holds for a while** — with a start date, a shelf life, and the evidence that put it there.
-
-**Scope: memory only.** Someone else builds the assistant. This is the part that remembers. No UI, no persona, no proactive messaging — those belong to the host.
-
----
-
-## Three assumptions this is built on
-
-**1. What is missing is time, not storage.**
-Keeping text was never the hard part. Answering *"is this still true, and how long has it been true?"* is. Every belief carries `valid_from`, `invalid_at`, `retention` and `due_in`.
-
-**2. Behaviour tells you who someone is.**
-What people say is filtered. What they *do* — when they show up, how often, at which hour, on which app — is not. Rhythm is sampled passively and promoted to a belief only after it repeats.
-
-**3. A label is a compression, and compression loses context.**
-`goals / ship V1.0` says nothing about *"demo is Friday, missing it breaks the contract."* Labels are the index, not the memory.
-
----
-
-## What it does
-
-### Retrieval is two-stage: index first, read second
-
-| Layer | Unit | Size | When it is read |
-|---|---|---|---|
-| index | `label` (10–20 tokens) | hundreds | every query |
-| context | `reasoning` — why it was stored | one line | hits only |
-| evidence | the original sentence | 1–4k chars | hits only, first N |
-
-Scoring never touches raw text. Only after an item is selected does `expand=N` go back for *why it was stored* and *what was actually said*.
-
-The cheap part stays cheap: the embedding surface is labels (hundreds × 15 tokens), not conversation chunks (thousands × 200). The accurate part stays accurate: the interpreter sees the original sentence instead of a flattened tag.
-
-### Beliefs expire — Ebbinghaus, per category
-
-`R(t) = exp(-t / S)`. `S` is stability in days, set per category: facts live for years, `state` lives for days. Each new supporting evidence lengthens `S` with the spacing effect (`S' = S·(1 + k·(1−R))`) — repeating something just heard adds almost nothing, repeating something about to be forgotten adds a lot. Below `R < 0.3`, a belief is archived: kept, no longer retrieved.
-
-### Two time axes
-
-`valid_from` / `invalid_at` are independent of when the fact was learned. Corrected beliefs are invalidated, **not deleted**, so `state(as_of=...)` can still answer *"what did we think in September"*.
-
-### Behaviour becomes a belief
-
-Activity is sampled passively — on Windows via `UserAssist` + `Recent` (ROT13-decoded keys, FILETIME epoch, no daemon needed) — bucketed into 7×24 counters, and promoted only when the pattern recurs on **≥3 distinct days** with ±1 hour tolerance. Promotion consumes the observation, so nothing is promoted twice; a rhythm not re-confirmed within 30 days is dropped.
-
-### The primary key is the identity
-
-`uuid5(user:track:category:label)` — the same belief always lands on the same record, so writes are idempotent and the profile can be rebuilt from the store. Observation-type records fold their timestamp into the key, so *the same sentence at two different times* stays two observations.
-
-### 15 relevant, 3 from other tracks
-
-Retrieval returns 15 items that answer the question, plus **3 from categories that were not selected** — the "unasked but related" recall that makes an answer feel like it came from someone who knows you. Deliberately not rank 16–18.
-
-### Writes stay off the critical path
-
-Two agents, one job each: the **responder** only replies, the **detective** only writes memory. The detective runs on a thread pool after the reply, throttled by profile maturity (120s cold, 600s warm). Deep mode is the same pipeline with a stronger prompt and a bigger budget — not a third reasoning layer.
-
----
-
-## How it compares
-
-| | Stores | Cannot answer |
+| Type | Examples | Lifetime |
 |---|---|---|
-| **mem0** | extracted facts + vector index | "is this still true?" |
-| **Zep / Graphiti** | temporal knowledge graph, validity windows | "what is this person's rhythm?" |
-| **Letta** | context tiers the model pages itself | "when should this expire?" |
-| **Memobase** | profile + event streams | "what did the behaviour imply?" |
-| **PersonaTrace** | beliefs with shelf life + evidence + rhythm | — |
+| Belief | preferences, identity, constraints, projects, goals, habits | retention curve per category; archived, not deleted |
+| Intention | "class the day after tomorrow", "submit the report Friday" | due + grace; `done / cancelled / expired` |
+| Evidence | the sentence a belief came from | kept with the belief; read only after a hit |
+| Mention | "someone said he is preparing for an exam" | separate from first-hand beliefs; decays faster |
 
-mem0's 2026 rewrite dropped UPDATE/DELETE in favour of append-only extraction with temporal reasoning at retrieval. Same conclusion reached from the other side: **append evidence, judge at read time.** The difference is that conclusions live in their own layer here, so the prompt never carries raw history.
+The merged path uses **17 belief categories** across two tracks:
 
----
-
-## Plug it in
-
-### AstrBot (recommended: reads and writes every turn, no model cooperation needed)
-
-MCP only exposes tools; whether they get called is up to the model. "She remembers me"
-has to happen unconditionally, so AstrBot gets a **plugin**:
-
-```bash
-pip install "personatrace @ git+https://github.com/Stellfract-Frost/PersonaTrace"
-# the plugin lives in its own repo — clone it into AstrBot's data/plugins/ and reload:
-#   git clone https://github.com/Stellfract-Frost/astrbot_plugin_personatrace
-personatrace-doctor     # proves it writes, reads back, and survives a restart
+```text
+work:    explicit_facts expertise projects goals likes dislikes constraints
+persona: identity traits interests style_notes behavior_patterns
+         decision_style interpersonal boundaries habit state
 ```
 
-### MCP (no adapter code)
+## How retrieval works
+
+```text
+query
+  ├─ pinned: boundaries / constraints / identity
+  ├─ semantic: lexical IDF + vector cosine (candidate-set normalized)
+  ├─ time facet: due/range rows, only for time-intent questions
+  ├─ cross-category: items from categories not already selected
+  └─ evidence on demand: reasoning + original sentence for the first hits
+```
+
+`score = (0.15 + 0.85 * similarity) * (0.35 + 0.65 * retention)`
+
+A time question is not answered by a better embedding. It is answered by
+putting the date into a typed field and querying that field. The facet is a
+conditional bypass, not a second retriever.
+
+## Install
+
+```bash
+pip install personatrace
+# optional embedding / LLM / API layers
+pip install "personatrace[llm,vector]"
+```
+
+Python 3.10+. The core belief kernel uses the standard library. The merged
+facade uses Pydantic; the default local store is SQLite. Redis is optional.
+
+## Quick start: structured memory
+
+The host extracts beliefs/intentions; PersonaTrace stores, ranks and expires
+them. This path does not call an LLM.
+
+```python
+from personatrace import MergedMemory
+
+memory = MergedMemory(
+    user_id="alice",
+    sqlite_path="./personatrace.db",   # beliefs + intentions in one file
+)
+
+memory.write(
+    beliefs=[{
+        "category": "identity",
+        "label": "名字叫小陌",
+        "confidence": 0.9,
+        "reasoning": "user introduced themselves",
+    }],
+    intentions=[{
+        "action": "上课",
+        "due": "后天",
+        "importance": 0.9,
+        "confidence": 0.8,
+    }],
+    source="direct",
+)
+
+context = memory.build_context("我那个 deadline 是几号")
+print(context.agenda_lines)
+print(memory.inject("我那个 deadline 是几号"))
+```
+
+- `build_context()` returns structured data and has no side effects.
+- `inject()` is an optional prompt adapter; the host can render the pack itself.
+- `source` must be one of `direct / bridge / console`; proactive turns must not
+  write user facts.
+
+## MCP
+
+The server exposes eight tools. The merged tools use SQLite by default, so no
+Redis or server setup is required.
 
 ```json
 {
   "mcpServers": {
-    "personatrace": { "command": "python", "args": ["mcp_server.py"] }
+    "personatrace": { "command": "personatrace-mcp" }
   }
 }
 ```
 
-| tool | when it fires |
+| Tool | Purpose |
 |---|---|
-| `memory_state` | "what do we know about this person, now or back then" |
-| `memory_recall` | needs background; pinned + ranked, plus how many were hidden |
-| `memory_observe` | after a turn — idempotent, same label never duplicates |
-| `memory_correct` | user says "you remembered that wrong" |
-| `memory_predict` | next action, from the behaviour sequence |
+| `memory_state` | current or historical beliefs |
+| `memory_recall` | pinned + ranked beliefs, with hidden count |
+| `memory_observe` | write one evidence-backed belief |
+| `memory_correct` | invalidate a belief without deleting history |
+| `memory_predict` | next action from the behavior sequence |
+| `memory_remember` | write already-extracted beliefs / intentions |
+| `memory_context` | structured pinned/dated/related/cross/agenda pack |
+| `memory_agenda` | read-only short-term agenda |
 
-Standard library only. Every call has an 8s timeout and returns an error *result* instead of raising — a failing memory must never take the host's conversation down.
+Every call has an 8s timeout and returns an error result instead of raising.
+A failing memory must never take the host's conversation down.
 
-### Python SDK
+See [MCP.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/MCP.md).
 
-```python
-from personatrace import PersonaConfig, PersonaManager, LLMClient
-from sentence_transformers import SentenceTransformer
+## Evaluation
 
-cfg = PersonaConfig(llm_api_key="sk-...", llm_base_url="https://api.openai.com/v1", llm_model="gpt-4o")
-emb = SentenceTransformer("multi-qa-MiniLM-L6-cos-v1")
-mgr = PersonaManager(cfg, llm=LLMClient(cfg), embed_fn=lambda t: emb.encode(t).tolist())
+A 12-belief, 10-query fixture is included. It is a directional gate, not a
+benchmark.
 
-mgr.ingest_conversation(user_msg="...", ai_reply="...", user_id="alice")
-print(mgr.format_profile(user_id="alice"))
+```text
+method                      recall@3     MRR
+v2 native (no pinned)           35.0%   0.333
+v2 native (pinned)              23.3%   0.283
+v1 string                       53.3%   0.583
+v1 + bge                        76.7%   0.833
+outer + bge                     76.7%   0.833
+outer + bge + time facet        90.0%   0.933
 ```
 
-### FastAPI
+The useful comparison is `outer + bge` → `+ time facet`: the gain comes from
+typed time, not from a stronger embedding.
 
-`/v1/observe` · `/v1/state?as_of=` · `/v1/recall?expand=` · `/v1/behavior` · `/v1/behavior/predict` · `/v1/beliefs/{id}/invalidate` · `/v1/health`
+```bash
+python scripts/eval_recall.py
+python scripts/eval_recall.py --no-embed
+```
 
----
+## Design notes
 
-## Status
+The full failure analysis, measurements, tradeoffs and pitfalls are in
+[DESIGN_NOTES.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/DESIGN_NOTES.md).
+The temporal kernel is described in
+[MEMORY_V2.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/MEMORY_V2.md).
 
-| Built | Next |
+## What is shipped
+
+| Area | Status |
 |---|---|
-| retention decay computed at read time (no cron scan) | two-way evidence query (evidence → which beliefs) |
-| bi-temporal state + `as_of` | MySQL persistence (evidence / belief / events) |
-| two-stage retrieval (index → read) | `as_of` wired into the chat prompt |
-| rhythm pipeline: passive sampling → ≥3-day gate → consume | intent routing (facts / advice / recall / self) |
-| behaviour sequence + next-action estimate | quantify the accuracy cost of dropping instant analysis |
-| cross-category association (15 + 3) | |
-| MCP server · FastAPI layer · idempotent writes | |
+| v2 kernel: retention, bi-temporal state, evidence, CAS guard | shipped |
+| SQLite persistence by default | shipped |
+| 17-category belief contract + Chinese typed time | shipped |
+| outer retrieval + time facet + cross-category | shipped |
+| short-term intentions with importance / TTL / anti-nag | shipped |
+| `MergedMemory` facade + MCP tools | shipped (M2) |
+| v1 → v2 migration script | shipped; dry-run by default |
+| graph memory | experimental, not wired into default retrieval |
+| `PersonaManager` default path switched to merged | not yet (M3) |
 
-```
-$ pytest test_memory_v2.py test_mcp_server.py -q
-27 passed
-```
+Known limits:
 
-Single user by design; `user_id` is threaded through so it stays additive.
-
----
-
-## Not doing
-
-- **UI, persona, proactive messages.** The host owns how it feels.
-- **Multi-tenant / auth.** Not needed for one person; it would be decoration.
-- **Parameter-level memory (LoRA).** Unverifiable at this scale.
-- **Self-hosted ANN tuning.** A few hundred beliefs — brute-force ranking is simpler and more accurate.
-
----
+- single user; no multi-tenant or auth;
+- no UI, persona, or proactive messaging;
+- label-keyed beliefs still create a second record for a paraphrase;
+- the evaluation set is small;
+- `PersonaManager` remains the legacy v1 pipeline; use `MergedMemory` or MCP
+  for the merged path.
 
 ## License
 

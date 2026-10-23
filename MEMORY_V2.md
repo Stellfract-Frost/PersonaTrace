@@ -1,328 +1,123 @@
-# Memory v2：时序人格记忆内核
+# Temporal memory kernel
 
-> 改动的出发点不是"要加 Redis"，而是五个真实问题。每个问题先看别人怎么解，再决定这里怎么解。
+`personatrace.memory_v2` is the storage and lifecycle kernel. It does not call
+an LLM, does not build prompts, and does not depend on a vector database.
 
----
+## Belief
 
-## 1. 先看别人的实现（2026-10 实测查证）
-
-| 项目 | 具体机制 | 对本项目的影响 |
-|---|---|---|
-| **mem0（2026-04 新算法）** | **放弃了 UPDATE / DELETE，改成单次 ADD-only 抽取**：「Memories accumulate; nothing is overwritten」；配合 entity linking 与**时间推理检索**（rank the right dated instance for current state / past events / upcoming plans）。LongMemEval 94.4 | **重要验证**：原 skills_bot 的「合并/矛盾/淘汰」写在写入路径上，是旧范式。新范式是**证据只追加、时间推理放到读取时** |
-| **Zep / Graphiti** | 双时态（bi-temporal）：每个事实带 validity window，「when it became true, and when it was superseded」；矛盾时**失效而非删除**；可查"现在为真"或"任意时点为真"；一切可回溯到 episode | 直接采用：`valid_from / invalid_at` + `as_of` 查询 + 不删除 |
-| **PowerMem（OceanBase）** | **艾宾浩斯遗忘曲线**做时间衰减加权（保留率随时间指数下降），优先返回最近且相关的 | 采用但改造：不只按时间衰减，还让**每条记忆有自己的稳定度 S**，支撑证据会拉长 S |
-| **MemOS** | 异步**调度**：提前预测下一步需要什么记忆并预激活 | 参考其异步思想；本项目用行为序列的 bigram 做轻量版预测 |
-| **Letta** | sleep-time compute：模型空闲时整理记忆 | 与本项目"侦探异步旁路"同源；这里的锁机制保证并发安全 |
-
-一句话总结差距：**别人已经把"时间"做进数据结构和检索，而不只是做一个衰减系数。**
-
----
-
-## 2. 五个改动（每个都对应一个实际痛点）
-
-### 2.1 衰减：从"每天统一降分"换成"艾宾浩斯保持率 + 间隔效应"
-
-**原来的问题**：`_decay_all` 按置信度分档（0.01–0.08/天），每天全量扫一遍。
-- 方向错了：衰减速度应该由**信息类型**决定，不是由"我多确定"决定；
-- 也浪费：每天扫全库只为改几个数字。
-
-**改法**：
-
-```
-R(t) = exp(-t / S)                    保留率，S = 稳定度（天）
-S'   = S · (1 + k·(1-R))              间隔效应：越接近遗忘临界点复习，增益越大
-eff  = confidence · R                 有效置信度
-R < 0.30 → 归档（不删，不参与取用）
+```text
+id            deterministic uuid5(user, track, category, label)
+user_id       single-user by default, carried through every key
+track         work | persona
+category      profile category
+label         short index (the embedding surface)
+confidence    extraction confidence, not importance
+stability     days until retention reaches 1/e
+last_support  timestamp of the last supporting evidence
+valid_from    when the belief became true
+invalid_at    when it stopped being true (kept, not deleted)
+status        active | deprecated | contested
+hits          number of supporting observations
+dimension     identity | need | predict
+reasoning     why it was stored; read only after a hit
+due_at_ts     optional deadline/event timestamp
+time_kind     none | due | past | range | recurring
+time_raw      original time expression
+evidence      L0 evidence ids
 ```
 
-- `S` 按类别初始化：`explicit_facts 520 / identity 300 / constraints 180 / expertise 240 / likes 90 / projects 60 / goals 45 / state 10`
-- **关键收益：不再需要定时扫描。** 读的时候算一次，O(1)。10 万条记忆也一样。
-- **间隔效应是真实认知规律**：刚记完就说一遍，几乎无增益；快忘时再说一遍，才真正加固。原来的「每次 +0.025 置信度」把这个信息丢掉了。
+`uuid5` makes writes idempotent: the same belief lands on the same record.
+The tradeoff is that a paraphrase is a new label and therefore a new record.
 
-### 2.2 回溯：双时态 + ZSET 时间索引
+## Retention
 
-**原来的问题**：只有 `updated`，问不出「他 9 月是什么状态」；事件日志还封顶 50 条（有损）。
-
-**改法**：
-- 信条带 `valid_from_ts / invalid_at_ts`，失效**只打时间戳不删除**（Graphiti 原则）；
-- 用 Redis **ZSET**（score = valid_from）建立时间索引 → `as_of` 查询 = `ZRANGEBYSCORE(-inf, as_of)` + 过滤 `invalid_at`，**O(log N + M)**，不用全表扫、不用重算。
-
-这让"长效规划"第一次有了数据基础：模型可以问「上个月他相信什么」，也能知道「这条是三个月前成立的，现在可能变了」。
-
-### 2.3 并发：SET NX + fencing token（修掉那个 P0）
-
-**原来的问题**：`_detective_impl` 是 `load()` → **一次 LLM 调用** → `save()`。`save()` 内部的锁只保护写入那一段，不保护整个事务。两个侦探并发时：
-
-```
-T1 load v1        T2 load v1
-T1 save(v1+A) → v2
-                  T2 save(v1+B) → v3   ← A 被静默覆盖
+```text
+R(t) = exp(-(now - last_support) / stability)
+effective_confidence = confidence * R(t)
 ```
 
-**改法**：
-- `SET lock:{user} {token} NX PX 10000` 抢锁，抢不到**直接跳过本轮**（绝不阻塞对话）；
-- token 里带递增序号（fencing token），旧持有者的写入被识别为过期；
-- `belief.version` 每次 +1，写回可做 CAS 校验。
-- 接入点：`detective_analyze()` 用 `try/finally` 包住整段（含 early return 分支），锁必然释放。
+Each new supporting evidence increases stability:
 
-### 2.4 前瞻：从"过了几天"到"还剩几天 / 拖了多久"
-
-**原来的问题**：`format_for_prompt` 只有 `deadline - today`（`days`），模型看不到"这条结论多久没被强化"，也看不到"这件事挂太久没人推"。
-
-**改法**：新增 `aging_lines()`，往 prompt 里加两段：
-
-```
-【到期 / 拖欠】(主动推进，不要等用户提起)
-  - 联调（已超期 5 天）
-  - 改稿（还有 20 天，已 14+ 天无推进）
-
-【待复核】(引用这些结论时语气放弱，先确认是否仍成立)
-  - 交付 V1.0（保持率 21%，已 200 天未强化）
+```text
+S' = S * (1 + k * (1 - R))
 ```
 
-- 超期/拖欠 → 支撑"主动推进"（长效规划的落点）
-- 保持率低但置信度高的条目 → 单独提示，防止把三个月前的偏好当现状
-- 低置信条目不进复核区，避免噪声
+The closer the belief is to being forgotten, the larger the gain. A review
+immediately after writing adds almost nothing. Stability is capped at 20× the
+category's initial value so a frequently repeated item cannot become immortal.
 
-### 2.5 预测：行为序列 + bigram 转移
+Initial stability is category-specific:
 
-**原来的问题**：只有 7×24 计数，能算"什么时候活跃"，算不出"下一步会做什么"。
-
-**改法**：
-- 行为落 ZSET（`kind|target|ms` → 时间戳），`ZREMRANGEBYRANK` 只保最近 1000 条，内存恒定；
-- `predict_next()` 取最近窗口做 bigram：`P(next | last)`，返回 top-3 与支持度。
-- 纯统计、O(1)、**可解释**（能说"因为最近三次 ask 后面都是 app"），不需要模型。
-
----
-
-## 3. 文件与接口
-
-| 文件 | 内容 |
+| category | days |
 |---|---|
-| `memory_v2.py` | 后端抽象（Redis / 进程内降级）、衰减、双时态、Guard、`MemoryV2` 内核、`aging_lines` |
-| `api_v2.py` | FastAPI 路由：Pydantic 入参、`as_of` 一等公民、阻塞调用走 `to_thread` |
-| `test_memory_v2.py` | 13 个离线测试（不需要 Redis / LLM / 网络） |
-| `skills_bot.py` | 5 处接入：导入与懒加载单例、`format_for_prompt` 加时效段、`detective_analyze` 加锁、`build_api` 挂 `/v1` 路由 |
+| explicit_facts | 520 |
+| identity | 300 |
+| constraints | 180 |
+| expertise | 240 |
+| likes / dislikes | 90 |
+| projects | 60 |
+| goals | 45 |
+| state | 10 |
+| traits | 300 |
+| interests | 120 |
+| style_notes | 180 |
+| behavior_patterns | 120 |
+| decision_style | 240 |
+| interpersonal | 180 |
+| boundaries | 365 |
+| habit | 90 |
 
-### HTTP 接口（挂载在原有服务上）
+Below `R < 0.30`, a belief is archived: it remains in storage but is not
+returned by normal reads. `gc()` can reclaim very old, rarely supported
+beliefs; archive is not deletion.
 
-| 方法 | 路径 | 说明 |
+## Two time axes
+
+`valid_from` / `invalid_at` describe when a fact was true. `last_support`
+describes when the system learned or reinforced it. Corrected beliefs are
+invalidated, not removed, so `state(as_of=...)` can answer "what did we think
+in September" without replaying the whole store.
+
+## Three read layers
+
+| Layer | Unit | When it is read |
 |---|---|---|
-| POST | `/v1/observe` | 写入观察，返回 hits / 稳定度 / 保持率 |
-| GET | `/v1/state?as_of=` | **某一时刻的完整状态**（时间回溯） |
-| GET | `/v1/recall?q=&k=` | 约束与身份强制入选 + 相关度×保持率排序 |
-| POST | `/v1/beliefs/{id}/invalidate` | 失效（不删除） |
-| POST | `/v1/behavior` | 记录一次行为 |
-| GET | `/v1/behavior/predict` | 预测下一步动作 |
-| GET | `/v1/health` | 后端类型 / 信条数 / 行为数 |
+| index | label + category + retention | every query |
+| context | reasoning | only for selected items |
+| evidence | original sentence | only for selected items, first N |
 
----
+The scoring path never touches raw evidence. This keeps the embedding surface
+small and makes the expensive read proportional to the number of hits.
 
-## 4. 实测
+## Write path
 
-```
-D:/Anaconda3/python.exe -m pytest test_memory_v2.py -q
-13 passed in 0.86s
-```
+1. Resolve the belief id from `(user, track, category, label)`.
+2. Acquire a per-user lock with a fencing token.
+3. Re-read the belief and check the version.
+4. Append evidence id; reinforce stability; increment hits.
+5. Write the hash and timeline index.
+6. Release the lock.
 
-覆盖：半衰期数学、间隔效应（快忘时增益 > 刚记完时 5 倍）、幂等写入（同一 label 两次 = 1 条 + hits=2）、`as_of` 回溯（失效前后结果不同）、归档区（低于阈值不参与取用但不删除）、必选项钉住 + 新鲜度排序、bigram 预测、双写者被拒、节流窗口、`due_in` 前瞻、FastAPI 全链路（含 422 校验）。
+Concurrent writers either replay or fail visibly; they do not silently
+overwrite each other.
 
-### 复杂度对比
+## Backends
 
-| 操作 | 原实现 | v2 |
-|---|---|---|
-| 衰减 | 每天全表扫 O(N) | 读时计算 **O(1)** |
-| 历史状态查询 | 无法回答 | `ZRANGEBYSCORE` **O(log N + M)** |
-| 重复写入 | 依赖相似度判断 | 确定性主键，**天然幂等** |
-| 并发写入 | 静默覆盖 | SET NX + fencing，**抢不到就跳过** |
-| 下一步预测 | 无 | bigram **O(窗口)** |
+`build_backend()` chooses, in order:
 
----
+1. Redis, if the `redis` package is installed and a URL is provided;
+2. SQLite, at `db_path` / `PERSONA_DB` / `~/.personatrace/memory.db`;
+3. in-process memory, for tests.
 
-## 5. 怎么跑
+SQLite is the default for a local single-user install. Redis is optional and
+exists for multi-process sharing.
 
-```bash
-# 无 Redis：自动退回进程内后端，功能完整
-D:/Anaconda3/python.exe -m pytest test_memory_v2.py -q
+## What the kernel does not do
 
-# 有 Redis：多进程共享（自动检测，连不上就降级，不报错）
-redis-server &
-D:/Anaconda3/python.exe -c "from memory_v2 import MemoryV2; m=MemoryV2(); print(m.mode)"
+- It does not extract beliefs from text; `extract` / `MergedMemory` do that.
+- It does not decide which query intent is active; `recall` / `facet` do that.
+- It does not manage short-term tasks; `IntentStore` does that.
+- It does not own prompts, tone, UI, or proactive messages.
 
-# 起 API（挂载在原服务上，原有 6 个路由不变）
-D:/Anaconda3/python.exe skills_bot.py --api
-```
-
-`memory_v2` 缺失或被删掉时，`skills_bot.py` 的 `MEMORY_V2_AVAILABLE=False`，全部退回 v1 行为——**不会因为新模块挂掉整个程序**。
-
----
-
-## 6. 两级检索（late materialization）
-
-这是整个检索层最容易被误读、但最值钱的设计：**索引单位 ≠ 存储单位 ≠ 阅读单位**。
-
-| 层 | 单位 | 体量 | 什么时候读 |
-|---|---|---|---|
-| 索引（表层） | `label`（10–20 token） | 几百条 | 每次查询都打分 |
-| 语境 | `reasoning`（为什么存这条，<100 字） | 每条一句 | 仅命中的条目 |
-| 证据（L0） | 原始语句 | 每条 1–4k 字 | 仅命中的条目、且只取前 N 条 |
-
-### 为什么成本低
-
-| | 常规 RAG | 这里 |
-|---|---|---|
-| 索引面 | 所有对话 chunk 全文（几千条 × 200 token） | 结论标签（几百条 × 15 token） |
-| 打分时读什么 | 全文向量 | 标签向量（缓存命中不计费） |
-| 注入 prompt | top-k 原文（k × 200+ token） | 标签 15 条（≈225 token）+ **只有命中的 2–3 条**才回表读原文 |
-| 深读代价 | 与 k 成正比且不可控 | 与 `expand` 严格成正比（0–5） |
-
-一句话：**表层检索完全不碰具体语句**，所以它便宜；原文只在命中后才读，所以它准。
-
-### 为什么不只存标签（扁平化问题）
-
-纯标签是压缩表示，会把语境丢掉。举一个真实差别：
-
-- 只存标签：`goals / 交付 V1.0`
-- 带 reasoning：`他说这周五要演示，做不完就违约`
-
-模型看到后者才知道「这件事有时间压力、有违约后果」；看到前者只当一条待办。**标签负责被检索到，reasoning 负责被正确理解。**
-
-### 已知盲区（要承认）
-
-`label` 是唯一索引 → 如果用户问的东西在原文里、但没体现在任何 label 上，就检索不到。
-
-三条缓解：
-1. 查询侧多 tag 拆分（`_extract_tags` 切 ≤5 个），提高覆盖面；
-2. `observation_log` 作为兜底索引（未沉淀成结论的原始观察也可被召回）；
-3. 定期做 label 覆盖度自检：抽取时若原文有信息未落到任何 label，写进 `uncertain` 而不是丢掉。
-
-### 代码位置
-
-- 写入：`observe(..., reasoning=..., evidence_text=...)` → reasoning 进信条，原文进 `evidence:{user}:{id}`
-- 表层：`recall(..., expand=0)` → 只返回标签与分数
-- 深读：`recall(..., expand=2)` → 追加 `reasoning` / `evidence_count` / `evidence_texts`（最多 2 条）
-- 出口：MCP `memory_recall` 的 `expand` 参数、FastAPI `GET /v1/recall?expand=`
-
-### 6.1 别人怎么"分块"，我们为什么不按块走
-
-先分清两件事，混在一起就说不清了：
-
-| | 切什么 | 什么时候切 |
-|---|---|---|
-| **写入侧分块**（别人常说的 chunking） | 文档 / 对话 → 固定长度片段（512–1024 token，带 overlap），或按轮次切 | 入库时 |
-| **查询侧分解**（我们做的） | 用户这一句 → ≤5 个 tag | 检索时 |
-
-主流方案的写入侧做法：
-
-| 方案 | 写入单位 | 检索命中什么 | 有没有回表 |
-|---|---|---|---|
-| 朴素 RAG | 定长 chunk（无语义硬切） | chunk 原文 | 不需要（原文就是结果） |
-| 语义分块 | 按语义断点切 chunk | chunk 原文 | 不需要 |
-| **mem0** | 抽取出的 **fact**（短句） | fact 文本本身 | **没有**——fact 就是记忆，原文不在检索链里 |
-| **Zep / Graphiti** | **episode**（原始消息）+ entity/edge | 图上的边与实体 | 有，但通过图遍历，不叫回表 |
-| Letta | 不分块，靠模型自己换页 | 模型决定取哪块 | 不需要 |
-| **这里** | **结论（label + reasoning）** | 标签 | **有**：`expand` 回表取 reasoning + 原文 |
-
-**差别不在"分不分块"，在索引建在什么上。**
-
-- 别人的索引建在**原文**上 → 召回面 = 全部文本 → embedding 成本随对话量线性涨
-- 这里的索引建在**结论**上 → 召回面 = 结论数量（比原文少 1–2 个数量级）→ 命中后再回表
-
-这是数据库里的**覆盖索引 + 回表**（index-only scan + late materialization）：先在窄索引上过滤，再按主键取宽行。用在这里，换到的是「成本低 + 可解释 + 能溯源」，付出的是「label 质量即召回上限」。
-
-### 6.2 这套组合的价值，说实话
-
-| 维度 | 判断 |
-|---|---|
-| 工程价值 | **高**。成本可控、结果可解释（每条都能说"为什么被选中"）、能溯源 |
-| 学术新颖性 | **低**。组成部分都是已知技术：query decomposition、summary index、late materialization、必选项钉住 |
-| 在记忆系统里 | **中高**。mem0 只给 fact 文本、Zep 走图，把"标签索引 + 回表原文 + 必选项钉住"三者拼起来的很少 |
-| 主要风险 | label 抽取失败 = 这条永久检索不到（比 chunk 方案更脆）；query 切 tag 靠标点与停用词，长句/跨语言会切坏 |
-
-一句话：**价值不在"分块"，在"索引单位与阅读单位错位"。**
-
-### 6.3 存储分层是不是也烂大街？（逐项对照）
-
-先厘清：上一节的"两级"说的是**检索路径**；你说的"表层 / 里层"是**存储结构**。两者是同一件事的两面。
-
-| 存储设计 | 业界常见度 | 判断 |
-|---|---|---|
-| **分两层**（结论层 + 证据层） | **几乎标配** | mem0 = messages + memories；Zep = episode + facts/entities；Memobase = event + profile。**分层本身不新鲜** |
-| 单容器 + payload 分区（`user_id` / `category` 过滤） | 常见 | 权衡项，不是创新；换来"整库可重建"，付出"全量重写" |
-| 上限裁剪（explicit_facts 30 / analysis_log 10 / observation 200） | 常见 | 有节制，但不是设计 |
-| **三级置信隔离**（主画像 / uncertain / low_confidence / 观察池） | 中等 | 有想法：猜测物理隔离，不污染结论。类似"暂存区"，非首创 |
-| **确定性主键 = 身份**（`uuid5(user:track:category:label)`） | **少见** | 多数用自增 id / uuid4 + 去重逻辑。用内容决定身份，写入天然幂等 |
-| **事件类把时间戳并入主键** | **少见** | 同一句话在不同时间 = 两条观察。Zep 用 `valid_at` 字段解决同一个问题，路子不同 |
-| **整库可重建 / 可导出** | 中高 | 是"主键 + 单容器"的副产品；只存 chunk 的方案做不到（原文在别处） |
-| meta 用零向量占位 | 小 trick | 让配置与记忆同库又不被检索命中；换后端可能失效 |
-
-**结论：分层是烂大街的，分层之后两层被同一条主键串起来——这不烂大街。**
-
-因果链要讲清楚：
-
-```
-存储分两层（结论 / 原文）
-      ↓  才能
-检索分两级（索引命标签 → 回表取原文）
-      ↓  才可能
-成本低一个数量级，同时每条结论可溯源
-```
-
-反过来看两个常见做法：
-- **只存原文**（朴素 RAG）：无法回表——因为压根没有"结论"这一层，只能把原文塞 prompt
-- **只存 fact**（mem0）：无法回表——原文不在检索链里，fact 就是终点
-
-**两样都存、且靠主键对上，才是这套东西的差异点。**
-
-### 6.4 这套存储的真实短板
-
-| 短板 | 说明 |
-|---|---|
-| 双写一致性 | label 是模型抽的、原文是原文。抽错了，回表会暴露矛盾（这算优点），但没有"重抽"机制：改了 label，reasoning 可能仍指向旧判断 |
-| 主键即 label | 文字一改（"写 Rust" → "写 Rust 和 Go"）就是新条目，旧条目只能等衰减；需要 rename 迁移 |
-| 单容器全量重写 | 每个 save 都 delete + upsert 全部类别，写入放大，且必须靠 CAS 兜并发 |
-| 召回上限 = label 质量 | 抽取漏了，就永远检索不到；这是比 chunk 方案更脆的地方 |
-
----
-
-## 7. 设计文档提出的改动：落地状态（逐条核对）
-
-⚠️ **设计文档里写了 ≠ 已实现。** v1.0 §11 是路线图，不是完成清单。以下是代码级核对结果。
-
-| # | 提出的改动 | 状态 | 证据 / 缺口 |
-|---|---|---|---|
-| 1 | 艾宾浩斯衰减（按类别稳定度，读时计算） | ✅ 已做 | `CATEGORY_STABILITY` / `retention()` / `reinforce()`；O(1) 读时算，无定时扫描 |
-| 2 | 用新衰减替换旧的 `_decay_all` | ❌ 未做 | `skills_bot.py` 仍走旧路径（按置信度分档 0.01–0.08）。**新旧两套并存** |
-| 3 | 双时态 + `as_of` 回溯 | ✅ 已做 | `state(as_of=)` + ZSET 时间索引 |
-| 4 | `valid_until`（预计失效日） | ❌ 未做 | 只有 `retention`，算不出"还有几天过期" |
-| 5 | `SET NX` + fencing 修并发覆盖 | ✅ 已做 | `Guard` + `detective_analyze()` 接入，抢不到就跳过 |
-| 6 | 两级检索（索引 → 回表） | ✅ 已做 | `observe(evidence_text=)` → `evidence:*`；`recall(expand=)` → `_evidence_snippets()` |
-| 7 | 15+3 的第 3 条取跨类别 | ✅ 已做 | `pick_cross_category()`，排除已入选类别 |
-| 8 | 行为序列 + 下一步预测 | ✅ 已做 | `record_behavior()` / `predict_next()`（bigram） |
-| 9 | `dimension` 三值（identity/need/predict） | ⚠️ 只落了字段 | 能标注，但**没有"从行为推 need"的逻辑**，目前靠调用方自己填 |
-| 10 | 聊天习惯结构化为 `habit` 类别 | ❌ 未做 | 习惯仍是 `style_notes` 里的碎片 |
-| 11 | 取用按意图路由（事实/建议/回忆/自我） | ❌ 未做 | 所有 query 走同一套取用 |
-| 12 | `hidden` 升级为"存在性提示" | ⚠️ 只返回计数 | `recall.hidden_count` 有了，但 prompt 里没使用 |
-| 13 | 证据链双向查询（原文 → 支撑了哪些结论） | ❌ 未做 | 只有结论 → 原文单向；没有 `belief_support` 反查 |
-| 14 | MySQL 持久化（证据/信条/事件） | ❌ 未做 | 重启会丢（当前 Redis / 进程内） |
-| 15 | `as_of` 接进对话主链路 | ❌ 未做 | API 支持，`chat_stream` 还没调用 |
-| 16 | `/v1/recall` 接向量 | ❌ 未做 | 现在传 `None`，只按时间与优先级取用，不做语义排序 |
-| 17 | MCP 标准出口 | ✅ 已做 | 5 个工具 + 10 项测试（含 stdio 子进程端到端） |
-| 18 | 量化「放弃即时分析」的精度损失 | ❌ 未做 | "精度只掉一点"仍无数字，面试会被追问 |
-| 19 | 第三层"顾问"接队列 | 🚫 已废弃 | 本人确认它只是深度模式（更强 prompt + 更大预算 + 边说边改），不承担独立推理 |
-
-**统计：已做 7 项，部分 3 项，未做 8 项，废弃 1 项。**
-
-### 未做的 8 项按优先级
-
-| 优先级 | 项 | 为什么排这个位置 |
-|---|---|---|
-| P0 | #13 证据链双向 | "可查证"只说了一半：能答"凭什么"，答不了"这句话影响了什么" |
-| P0 | #2 替换旧衰减 | 两套并存会让同一份画像出现两种衰减行为，debug 时最费时间 |
-| P1 | #15 `as_of` 接主链路 | 时间感的兑现点，不接就只有 API 有、对话没用 |
-| P1 | #16 recall 接向量 | 现在"按相关度排序"其实是时间与优先级，名不副实 |
-| P2 | #11 意图路由 | 决定"回答像不像在听人说话" |
-| P2 | #14 MySQL 落盘 | 重启丢数据，单机演示能忍，长期不行 |
-| P3 | #10 习惯维度 / #12 hidden 提示 | 锦上添花 |
-| P3 | #18 精度 A/B | 只有在要对外报数字时才必须 |
-
+Those boundaries are deliberate. The kernel stays small enough to test without
+an LLM, a network, or a running server.
