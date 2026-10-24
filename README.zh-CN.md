@@ -60,6 +60,27 @@ pip install "personatrace[llm,vector]"   # optional: LLM / embeddings
 Python 3.10+。belief 内核只用标准库；合并 facade 用 Pydantic；默认 SQLite，
 不需要 Redis。
 
+### 可选 Chroma episode 索引
+
+SQLite 是 episode 的 source of truth；Chroma 只做语义候选：
+
+```python
+from personatrace.chroma_index import ChromaEpisodeIndex
+
+index = ChromaEpisodeIndex(
+    path="./persona_data/chroma",
+    embed_fn=embed_fn,          # list[str] -> list[list[float]]
+)
+memory = MergedMemory(
+    user_id="alice",
+    sqlite_path="./personatrace.db",
+    vector_index=index,
+)
+```
+
+Chroma 不可用时自动退回字面 + 时间检索。v1 的 `persona_items` collection 不变；
+episode 使用独立的 `episode_turns` collection。
+
 ## 快速开始：结构化写入
 
 宿主负责抽取，PersonaTrace 负责存、排序、过期；这条路径不调用 LLM。
@@ -171,15 +192,15 @@ python scripts/eval_recall.py
 | 短期 intention：importance / TTL / anti-nag | 已发布 |
 | 保守的词面去重 | 已发布 |
 | `MergedMemory` + MCP | 已发布 |
-| episode + 回溯检索 | 已发布（1.6.0） |
-| weekly routine + in-turn probe | 已发布（1.6.0） |
+| episode + 回溯检索 | 已发布（1.6.1） |
+| weekly routine + in-turn probe | 已发布（1.6.1） |
 | v1 → v2 迁移脚本 | 有；默认 dry-run |
 | graph memory | 实验性，未接默认检索 |
 | `PersonaManager` 默认切到合并路径 | 未做（M3） |
 
 去重是词面且保守的；低重叠的复述仍可能产生第二条记录。50 条查询也仍然是小样本。
 Routine 目前是 weekly 字段，不是完整 RFC 5545 RRULE parser；probe 只是 hint，
-episode 检索目前是字面 + 时间范围；Chroma episode 索引还没接。
+Chroma 不可用时 episode 检索退回字面 + 时间；Chroma 需要外部 embed_fn。
 宿主必须自己问并回传 feedback；没有后台定时器，也不会自动主动发消息。
 
 明确不做：UI、人格、主动消息、多租户、聊天平台插件本体。

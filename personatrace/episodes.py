@@ -11,6 +11,7 @@ generator; this module deliberately starts with lexical + time filtering.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -24,6 +25,7 @@ from zoneinfo import ZoneInfo
 DEFAULT_TZ = "Asia/Shanghai"
 DEFAULT_EPISODE_TTL_DAYS = 90
 ALLOWED_SOURCES = frozenset({"direct", "bridge", "console"})
+logger = logging.getLogger(__name__)
 
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 _WORD = re.compile(r"[a-zA-Z0-9_]+")
@@ -105,9 +107,16 @@ class Episode:
 class EpisodeStore:
     """Append-only turn log with lexical + time-window retrieval."""
 
-    def __init__(self, path: str = ":memory:", default_tz: str = DEFAULT_TZ) -> None:
+    def __init__(
+        self,
+        path: str = ":memory:",
+        default_tz: str = DEFAULT_TZ,
+        *,
+        vector_index: Any = None,
+    ) -> None:
         self.path = str(path)
         self.tz = default_tz or DEFAULT_TZ
+        self.vector_index = vector_index
         if self.path != ":memory:":
             import os
             parent = os.path.dirname(os.path.abspath(self.path))
@@ -189,6 +198,11 @@ class EpisodeStore:
                 ),
             )
             self.conn.commit()
+        if self.vector_index is not None:
+            try:
+                self.vector_index.upsert([episode])
+            except Exception:
+                logger.warning("episode vector upsert failed", exc_info=True)
         return self.get(episode.id) or episode
 
     def link(
@@ -236,6 +250,17 @@ class EpisodeStore:
             ).fetchone()
         return self._from_row(row) if row else None
 
+    def get_many(self, episode_ids: Iterable[str]) -> Dict[str, Episode]:
+        ids = [str(x) for x in episode_ids if x]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM episodes WHERE id IN ({placeholders})", ids,
+            ).fetchall()
+        return {row["id"]: self._from_row(row) for row in rows}
+
     def recent(self, user_id: str, limit: int = 5) -> List[Episode]:
         with self._lock:
             rows = self.conn.execute(
@@ -276,40 +301,65 @@ class EpisodeStore:
         if not q:
             return [e.to_dict(include_reply, self.tz) for e in episodes[:max(1, int(limit))]]
 
-        q_tokens = _tokens(q)
-        q_set = set(q_tokens)
-        if not q_set:
-            return [e.to_dict(include_reply, self.tz) for e in episodes[:max(1, int(limit))]]
-        docs = [(e, _tokens(e.user_msg + " " + e.ai_reply)) for e in episodes]
-        df = {tok: 0 for tok in q_set}
-        for _ep, toks in docs:
-            tok_set = set(toks)
-            for tok in q_set & tok_set:
-                df[tok] += 1
-        total = len(docs)
-        scored = []
-        for ep, toks in docs:
-            tok_set = set(toks)
-            lexical = 0.0
-            for tok in q_set & tok_set:
-                lexical += math.log(1.0 + total / max(1, df[tok]))
-            if q in ep.user_msg:
-                lexical += 2.0
-            if lexical <= 0:
+        vector_hits: List[tuple[float, Episode]] = []
+        if self.vector_index is not None:
+            try:
+                hits = self.vector_index.query(
+                    q, user_id=user_id, limit=max(10, int(limit) * 3),
+                    after=after_ts, before=before_ts,
+                )
+                by_id = {e.id: e for e in episodes}
+                for hit in hits:
+                    episode = by_id.get(str(hit.get("id")))
+                    if episode is not None:
+                        vector_hits.append((float(hit.get("score", 0.0)), episode))
+            except Exception:
+                logger.warning("episode vector query failed; using lexical fallback", exc_info=True)
+
+        q_set = set(_tokens(q))
+        lexical_hits: List[tuple[float, Episode]] = []
+        if q_set:
+            docs = [(e, _tokens(e.user_msg + " " + e.ai_reply)) for e in episodes]
+            df = {tok: 0 for tok in q_set}
+            for _ep, toks in docs:
+                tok_set = set(toks)
+                for tok in q_set & tok_set:
+                    df[tok] += 1
+            total = len(docs)
+            for ep, toks in docs:
+                tok_set = set(toks)
+                lexical = 0.0
+                for tok in q_set & tok_set:
+                    lexical += math.log(1.0 + total / max(1, df[tok]))
+                if q in ep.user_msg:
+                    lexical += 2.0
+                if lexical <= 0:
+                    continue
+                age_days = max(0.0, (datetime.now(_zone(self.tz)).timestamp() - ep.ts) / 86400.0)
+                lexical_hits.append((lexical + 0.25 / (1.0 + age_days / 30.0), ep))
+            lexical_hits.sort(key=lambda item: (-item[0], -item[1].ts))
+
+        seen: set[str] = set()
+        merged: List[tuple[float, Episode]] = []
+        for score, episode in vector_hits + lexical_hits:
+            if episode.id in seen:
                 continue
-            age_days = max(0.0, (datetime.now(_zone(self.tz)).timestamp() - ep.ts) / 86400.0)
-            score = lexical + 0.25 / (1.0 + age_days / 30.0)
-            scored.append((score, ep))
-        scored.sort(key=lambda item: (-item[0], -item[1].ts))
+            seen.add(episode.id)
+            merged.append((score, episode))
         return [
             {**ep.to_dict(include_reply, self.tz), "score": round(score, 4)}
-            for score, ep in scored[:max(1, int(limit))]
+            for score, ep in merged[:max(1, int(limit))]
         ]
 
     def delete(self, episode_id: str) -> bool:
         with self._lock:
             cur = self.conn.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
             self.conn.commit()
+        if cur.rowcount and self.vector_index is not None:
+            try:
+                self.vector_index.delete([episode_id])
+            except Exception:
+                logger.warning("episode vector delete failed", exc_info=True)
         return cur.rowcount > 0
 
     def purge(self, user_id: Optional[str] = None, before: Any = None) -> int:
@@ -325,15 +375,33 @@ class EpisodeStore:
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         with self._lock:
+            rows = self.conn.execute(
+                "SELECT id FROM episodes" + (" WHERE " + " AND ".join(clauses) if clauses else ""),
+                params,
+            ).fetchall()
+            ids = [row["id"] for row in rows]
             cur = self.conn.execute(sql, params)
             self.conn.commit()
+        if ids and self.vector_index is not None:
+            try:
+                self.vector_index.delete(ids)
+            except Exception:
+                logger.warning("episode vector purge failed", exc_info=True)
         return cur.rowcount
 
     def stats(self) -> Dict[str, Any]:
         with self._lock:
             count = self.conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
-        return {"episodes": int(count), "path": self.path}
+        return {
+            "episodes": int(count), "path": self.path,
+            "vector_index": type(self.vector_index).__name__ if self.vector_index else None,
+        }
 
     def close(self) -> None:
         with self._lock:
             self.conn.close()
+        if self.vector_index is not None:
+            try:
+                self.vector_index.close()
+            except Exception:
+                pass

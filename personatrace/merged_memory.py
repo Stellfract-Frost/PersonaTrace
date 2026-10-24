@@ -189,6 +189,7 @@ class MergedMemory:
         intents: Optional[IntentStore] = None,
         episodes: Optional[EpisodeStore] = None,
         routines: Optional[RoutineStore] = None,
+        vector_index: Any = None,
         user_id: str = "default",
         redis_url: Optional[str] = None,
         sqlite_path: Optional[str] = None,
@@ -212,7 +213,9 @@ class MergedMemory:
         self.intents = intents or IntentStore(resolved_intents_path, default_tz=self.tz)
         resolved_episodes_path = episodes_path or (sqlite_path if memory is None else None) or ":memory:"
         resolved_routines_path = routines_path or (sqlite_path if memory is None else None) or ":memory:"
-        self.episodes = episodes or EpisodeStore(resolved_episodes_path, default_tz=self.tz)
+        self.episodes = episodes or EpisodeStore(
+            resolved_episodes_path, default_tz=self.tz, vector_index=vector_index,
+        )
         self.routines = routines or RoutineStore(resolved_routines_path, default_tz=self.tz)
         self._vec_cache: Dict[str, Sequence[float]] = {}
         # The 17-category stability table is a runtime config, not a kernel

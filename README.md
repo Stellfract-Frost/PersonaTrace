@@ -63,6 +63,28 @@ pip install "personatrace[llm,vector]"
 Python 3.10+. The core belief kernel uses the standard library. The merged
 facade uses Pydantic; the default local store is SQLite. Redis is optional.
 
+### Optional Chroma episode index
+
+SQLite owns the episode rows and all state. Chroma is an optional candidate
+index for semantic retrospective search:
+
+```python
+from personatrace.chroma_index import ChromaEpisodeIndex
+
+index = ChromaEpisodeIndex(
+    path="./persona_data/chroma",
+    embed_fn=embed_fn,          # list[str] -> list[list[float]]
+)
+memory = MergedMemory(
+    user_id="alice",
+    sqlite_path="./personatrace.db",
+    vector_index=index,
+)
+```
+
+If Chroma is unavailable, `EpisodeStore` falls back to lexical + time search.
+The v1 `persona_items` collection is separate; episodes use `episode_turns`.
+
 ## Quick start: structured memory
 
 The host extracts beliefs/intentions; PersonaTrace stores, ranks and expires
@@ -200,8 +222,8 @@ The routine/vector research note is
 | short-term intentions with importance / TTL / anti-nag | shipped |
 | conservative write-time dedup | shipped |
 | `MergedMemory` facade + MCP tools | shipped |
-| episodes + retrospective search | shipped (1.6.0) |
-| weekly routines + in-turn probes | shipped (1.6.0) |
+| episodes + retrospective search | shipped (1.6.1) |
+| weekly routines + in-turn probes | shipped (1.6.1) |
 | v1 → v2 migration script | shipped; dry-run by default |
 | graph memory | experimental, not wired into default retrieval |
 | `PersonaManager` default path switched to merged | not yet (M3) |
@@ -213,7 +235,7 @@ Known limits:
 - dedup is lexical and conservative; a low-overlap paraphrase can still create a second record;
 - 50 queries are still a small evaluation set;
 - routines are weekly fields, not a full RFC 5545 RRULE parser yet;
-- episode retrieval is lexical/time; the Chroma episodic index is not wired yet
+- episode retrieval falls back to lexical/time when Chroma is unavailable; Chroma requires an embedding function
 - routine probes are hints; the host must ask and must report feedback;
 - there is no background scheduler and no automatic proactive message;
 - `PersonaManager` remains the legacy v1 pipeline; use `MergedMemory` or MCP

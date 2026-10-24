@@ -157,6 +157,9 @@ keeps `user_msg`, `ai_reply`, time and links to belief/intention ids in SQLite.
 `build_context()` includes episodes only for retrospective markers (`last time`,
 `previously`, `还记得`, `上次`); ordinary queries do not replay the transcript.
 New beliefs point at an `episode_id` instead of copying the turn into L0.
+A Chroma collection (`episode_turns`) can provide semantic candidates, but the
+SQLite episode row remains the source of truth; no Chroma means lexical + time
+fallback.
 
 ### 3.10 Weekly routines are not daily habits
 
