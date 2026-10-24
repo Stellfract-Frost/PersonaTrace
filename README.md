@@ -213,6 +213,7 @@ Known limits:
 - dedup is lexical and conservative; a low-overlap paraphrase can still create a second record;
 - 50 queries are still a small evaluation set;
 - routines are weekly fields, not a full RFC 5545 RRULE parser yet;
+- episode retrieval is lexical/time; the Chroma episodic index is not wired yet
 - routine probes are hints; the host must ask and must report feedback;
 - there is no background scheduler and no automatic proactive message;
 - `PersonaManager` remains the legacy v1 pipeline; use `MergedMemory` or MCP

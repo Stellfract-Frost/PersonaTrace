@@ -179,6 +179,7 @@ python scripts/eval_recall.py
 
 去重是词面且保守的；低重叠的复述仍可能产生第二条记录。50 条查询也仍然是小样本。
 Routine 目前是 weekly 字段，不是完整 RFC 5545 RRULE parser；probe 只是 hint，
+episode 检索目前是字面 + 时间范围；Chroma episode 索引还没接。
 宿主必须自己问并回传 feedback；没有后台定时器，也不会自动主动发消息。
 
 明确不做：UI、人格、主动消息、多租户、聊天平台插件本体。
