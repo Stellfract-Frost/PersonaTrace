@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__version__ = "1.5.2"
+__version__ = "1.6.0"
 
 # 轻量、无外部依赖的成员（导入本包时不触发 chromadb / requests）
 from .config import PersonaConfig
@@ -42,6 +42,11 @@ _LAZY = {
     "Belief": ".memory_v2",
     "MergedMemory": ".merged_memory",
     "ContextPack": ".merged_memory",
+    "EpisodeStore": ".episodes",
+    "Episode": ".episodes",
+    "has_retrospective": ".episodes",
+    "RoutineStore": ".routines",
+    "Routine": ".routines",
     "IntentStore": ".intentions",
     "IntentExtractor": ".intent_extractor",
     "GraphStore": ".graph_memory",

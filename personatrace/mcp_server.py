@@ -5,7 +5,7 @@
 2. 整个协议本机要用到的只有 initialize / tools/list / tools/call / ping 四个方法，
    加起来不到 200 行，比引一个 SDK 更容易审。
 
-对外暴露八个工具（宿主模型自己决定什么时候调，不需要把画像全量塞进上下文）：
+对外暴露十三个工具（宿主模型自己决定什么时候调，不需要把画像全量塞进上下文）：
   memory_state     → 此刻（或某个历史时刻）它认为你是什么状态
   memory_recall    → 按查询取用：约束与身份强制入选，其余按相关度×保持率排序
   memory_observe   → 写入一条观察（证据 + 结论），幂等
@@ -14,6 +14,11 @@
   memory_remember  → 写入已抽取的 beliefs / intentions（不调用 LLM）
   memory_context   → 结构化读取：pinned / dated / related / cross / 短期任务
   memory_agenda    → 只读短期任务议程
+  memory_turn      → 只存一轮原始对话，返回 episode_id
+  memory_episodes  → 按时间和字面回溯原始 turn
+  memory_routine_probe    → 只读 weekly routine 的 in-turn probe 候选
+  memory_routine_feedback → confirmed / denied / skipped_today / unanswered / ended
+  memory_routine_label    → 显式标注 weekly routine（无动作词表）
 
 协议层仍然零依赖；merged 工具按需加载 Pydantic + SQLite。
 
@@ -40,7 +45,7 @@ except ImportError:  # 直接以脚本方式运行：python personatrace/mcp_ser
     from memory_v2 import DEFAULT_DB_PATH, MemoryV2  # type: ignore[no-redef]
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "personatrace-memory", "version": "1.5.2"}
+SERVER_INFO = {"name": "personatrace-memory", "version": "1.6.0"}
 DEFAULT_TIMEOUT = 8.0
 
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mcp_tool")
@@ -200,6 +205,63 @@ def _merged_remember(args: Dict[str, Any]) -> Any:
         args.get("intentions") or [],
         source=str(args.get("source") or "direct"),
         now=_now_arg(args),
+        episode_id=str(args.get("episode_id") or ""),
+    )
+
+
+def _merged_turn(args: Dict[str, Any]) -> Any:
+    return get_merged().record_turn(
+        str(args.get("user_msg") or ""),
+        str(args.get("ai_reply") or ""),
+        source=str(args.get("source") or "direct"),
+        session_id=str(args.get("session_id") or ""),
+        now=_now_arg(args),
+    )
+
+
+def _merged_episodes(args: Dict[str, Any]) -> Any:
+    return {
+        "items": get_merged().episodes_search(
+            str(args.get("query") or ""),
+            after=args.get("after"),
+            before=args.get("before"),
+            limit=int(args.get("limit", 3)),
+        )
+    }
+
+
+def _merged_routine_probe(args: Dict[str, Any]) -> Any:
+    return {"items": get_merged().routine_probes(
+        now=_now_arg(args), limit=int(args.get("limit", 3)),
+    )}
+
+
+def _merged_routine_feedback(args: Dict[str, Any]) -> Any:
+    return get_merged().routine_feedback(
+        str(args.get("probe_id") or ""),
+        str(args.get("result") or ""),
+        now=_now_arg(args),
+        note=str(args.get("note") or ""),
+    )
+
+
+def _merged_routine_label(args: Dict[str, Any]) -> Any:
+    return get_merged().label_routine(
+        str(args.get("action") or ""),
+        time=str(args.get("time") or "09:00"),
+        weekdays=args.get("weekdays") or (),
+        interval=int(args.get("interval", 1)),
+        anchor_date=args.get("anchor_date"),
+        valid_from=args.get("valid_from"),
+        valid_until=args.get("valid_until"),
+        exdates=args.get("exdates") or (),
+        rdates=args.get("rdates") or (),
+        status=str(args.get("status") or "candidate"),
+        confidence=float(args.get("confidence", 0.55)),
+        allow_probe=bool(args.get("allow_probe", True)),
+        sensitivity=str(args.get("sensitivity") or ""),
+        note=str(args.get("note") or ""),
+        now=_now_arg(args),
     )
 
 
@@ -227,6 +289,11 @@ HANDLERS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "memory_remember": _guarded(_merged_remember),
     "memory_context": _guarded(_merged_context),
     "memory_agenda": _guarded(_merged_agenda),
+    "memory_turn": _guarded(_merged_turn),
+    "memory_episodes": _guarded(_merged_episodes),
+    "memory_routine_probe": _guarded(_merged_routine_probe),
+    "memory_routine_feedback": _guarded(_merged_routine_feedback),
+    "memory_routine_label": _guarded(_merged_routine_label),
 }
 
 TOOLS = [
@@ -338,6 +405,7 @@ TOOLS = [
                     },
                 },
                 "source": {"type": "string", "enum": ["direct", "bridge", "console"], "default": "direct"},
+                "episode_id": {"type": "string", "description": "可选：把写入挂到 memory_turn 返回的 episode"},
                 "now": {"type": ["number", "string"], "description": "UNIX 秒或 ISO；不传=现在"},
             },
         },
@@ -364,6 +432,84 @@ TOOLS = [
                 "max_lines": {"type": "integer", "default": 6},
                 "now": {"type": ["number", "string"]},
             },
+        },
+    },
+    {
+        "name": "memory_turn",
+        "description": "只存一轮原始对话，不做抽取。返回 episode_id，供 memory_remember / memory_episodes 链接。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "user_msg": {"type": "string", "minLength": 1},
+                "ai_reply": {"type": "string", "default": ""},
+                "session_id": {"type": "string", "default": ""},
+                "source": {"type": "string", "enum": ["direct", "bridge", "console"], "default": "direct"},
+                "now": {"type": ["number", "string"]},
+            },
+            "required": ["user_msg"],
+        },
+    },
+    {
+        "name": "memory_episodes",
+        "description": "回溯检索原始 turn：按字面 + 时间范围，返回 user/assistant 原文与关联的 belief/意向 id。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "default": ""},
+                "after": {"type": ["number", "string"]},
+                "before": {"type": ["number", "string"]},
+                "limit": {"type": "integer", "default": 3},
+            },
+        },
+    },
+    {
+        "name": "memory_routine_probe",
+        "description": "只读返回当前时间窗口内的 routine probe 候选；不发送、不标记已问。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "now": {"type": ["number", "string"]},
+                "limit": {"type": "integer", "default": 3},
+            },
+        },
+    },
+    {
+        "name": "memory_routine_feedback",
+        "description": "回传 probe 结果：confirmed / denied / skipped_today / unanswered / ended。沉默不是 confirmed。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "probe_id": {"type": "string"},
+                "result": {"type": "string", "enum": ["confirmed", "denied", "skipped_today", "unanswered", "ended"]},
+                "note": {"type": "string", "default": ""},
+                "now": {"type": ["number", "string"]},
+            },
+            "required": ["probe_id", "result"],
+        },
+    },
+    {
+        "name": "memory_routine_label",
+        "description": "显式标注 weekly routine：自由 action + weekday/time + 单双周/学期/例外。无动作词表。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "minLength": 1},
+                "time": {"type": "string", "default": "09:00"},
+                "weekdays": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 7}},
+                "interval": {"type": "integer", "enum": [1, 2], "default": 1},
+                "anchor_date": {"type": ["number", "string"]},
+                "valid_from": {"type": ["number", "string"]},
+                "valid_until": {"type": ["number", "string"]},
+                "exdates": {"type": "array", "items": {"type": ["number", "string"]}},
+                "rdates": {"type": "array", "items": {"type": ["number", "string"]}},
+                "status": {"type": "string", "enum": ["candidate", "confirmed", "trusted", "paused", "ended"], "default": "candidate"},
+                "confidence": {"type": "number", "default": 0.55},
+                "allow_probe": {"type": "boolean", "default": True},
+                "sensitivity": {"type": "string", "default": ""},
+                "note": {"type": "string", "default": ""},
+                "now": {"type": ["number", "string"]},
+            },
+            "required": ["action"],
         },
     },
 ]

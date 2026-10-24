@@ -57,6 +57,8 @@ def test_tools_list():
     assert names == {
         "memory_state", "memory_recall", "memory_observe", "memory_correct",
         "memory_predict", "memory_remember", "memory_context", "memory_agenda",
+        "memory_turn", "memory_episodes", "memory_routine_probe",
+        "memory_routine_feedback", "memory_routine_label",
     }
     for t in resp["result"]["tools"]:
         assert t["inputSchema"]["type"] == "object"
@@ -131,6 +133,49 @@ def test_merged_remember_source_gate():
     assert payload(call("memory_context", query="名字"))["pinned"] == []
 
 
+
+
+def test_merged_turn_episodes_link_beliefs():
+    now = "2026-10-27T10:00:00+08:00"
+    turn = payload(call("memory_turn", user_msg="上次说每周二上课", now=now))
+    assert turn["episode_id"]
+
+    written = payload(call(
+        "memory_remember",
+        beliefs=[{"category": "identity", "label": "名字叫小陌"}],
+        episode_id=turn["episode_id"],
+        now=now,
+    ))
+    assert written["episode_id"] == turn["episode_id"]
+
+    episodes = payload(call("memory_episodes", query="上课", now=now))["items"]
+    assert episodes
+    assert episodes[0]["user_msg"] == "上次说每周二上课"
+    assert written["belief_ids"][0] in episodes[0]["belief_ids"]
+
+
+def test_routine_label_probe_feedback():
+    now = "2026-10-27T19:05:00+08:00"
+    labeled = payload(call(
+        "memory_routine_label",
+        action="attend class", time="19:00", weekdays=[2],
+        anchor_date="2026-10-20", status="candidate", now=now,
+    ))
+    assert labeled["weekdays"] == [2]
+    assert labeled["status"] == "candidate"
+
+    probes = payload(call("memory_routine_probe", now=now))["items"]
+    assert probes
+    assert probes[0]["action"] == "attend class"
+
+    result = payload(call(
+        "memory_routine_feedback", probe_id=probes[0]["probe_id"],
+        result="confirmed", now=now,
+    ))
+    assert result["status"] == "confirmed"
+    assert payload(call("memory_routine_probe", now=now))["items"] == []
+
+
 def test_unknown_tool_and_method():
     resp = call("memory_nope")
     assert resp["error"]["code"] == -32602
@@ -175,5 +220,5 @@ def test_stdio_end_to_end():
     lines = [json.loads(x) for x in proc.stdout.strip().splitlines() if x.strip()]
     assert len(lines) == 4                      # 通知不产生响应
     assert lines[0]["result"]["serverInfo"]["name"] == "personatrace-memory"
-    assert len(lines[1]["result"]["tools"]) == 8
+    assert len(lines[1]["result"]["tools"]) == 13
     assert json.loads(lines[3]["result"]["content"][0]["text"])["count"] == 1

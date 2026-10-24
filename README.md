@@ -21,6 +21,8 @@ measured in hours or days, not in months.
 |---|---|---|
 | Belief | preferences, identity, constraints, projects, goals, habits | retention curve per category; archived, not deleted |
 | Intention | "class the day after tomorrow", "submit the report Friday" | due + grace; `done / cancelled / expired` |
+| Episode | the raw user/assistant turn | SQLite; time-window + lexical retrospective search |
+| Routine | "attend class every Tuesday at 19:00" | weekly recurrence + term/exceptions + probe state |
 | Evidence | the sentence a belief came from | kept with the belief; read only after a hit |
 | Mention | "someone said he is preparing for an exam" | separate from first-hand beliefs; decays faster |
 
@@ -71,28 +73,28 @@ from personatrace import MergedMemory
 
 memory = MergedMemory(
     user_id="alice",
-    sqlite_path="./personatrace.db",   # beliefs + intentions in one file
+    sqlite_path="./personatrace.db",   # one file for the whole memory
 )
 
 memory.write(
     beliefs=[{
         "category": "identity",
-        "label": "名字叫小陌",
+        "label": "Name is Mo",
         "confidence": 0.9,
         "reasoning": "user introduced themselves",
     }],
     intentions=[{
-        "action": "上课",
-        "due": "后天",
+        "action": "attend class",
+        "due": "2026-10-25",
         "importance": 0.9,
         "confidence": 0.8,
     }],
     source="direct",
 )
 
-context = memory.build_context("我那个 deadline 是几号")
+context = memory.build_context("When is my deadline?")
 print(context.agenda_lines)
-print(memory.inject("我那个 deadline 是几号"))
+print(memory.inject("When is my deadline?"))
 ```
 
 - `build_context()` returns structured data and has no side effects.
@@ -100,10 +102,30 @@ print(memory.inject("我那个 deadline 是几号"))
 - `source` must be one of `direct / bridge / console`; proactive turns must not
   write user facts.
 
+### Turn and routine
+
+```python
+turn = memory.record_turn("I have class every Tuesday at 19:00", session_id="s1")
+memory.label_routine(
+    "attend class",
+    time="19:00",
+    weekdays=[2],              # Monday=1 ... Sunday=7
+    anchor_date="2026-10-20",
+    valid_until="2026-12-20",  # semester end
+    status="candidate",
+)
+pack = memory.build_context("Are we talking?")
+print(pack.routine_probes)     # hints only; the host decides whether to ask
+```
+
+A routine is weekly, not daily. One observation creates a candidate; explicit
+`label_routine` or a confirmation makes it weekly. `skipped_today`, `denied`
+and silence are separate states.
+
 ## MCP
 
-The server exposes eight tools. The merged tools use SQLite by default, so no
-Redis or server setup is required.
+The server exposes thirteen tools. The merged tools use SQLite by default, so
+no Redis or server setup is required.
 
 ```json
 {
@@ -123,6 +145,11 @@ Redis or server setup is required.
 | `memory_remember` | write already-extracted beliefs / intentions |
 | `memory_context` | structured pinned/dated/related/cross/agenda pack |
 | `memory_agenda` | read-only short-term agenda |
+| `memory_turn` | store one raw turn; returns an episode id |
+| `memory_episodes` | retrospective raw-turn search by topic and time |
+| `memory_routine_probe` | read-only in-turn routine probe candidates |
+| `memory_routine_feedback` | confirmed / denied / skipped_today / unanswered / ended |
+| `memory_routine_label` | explicit weekly routine with term/exceptions |
 
 Every call has an 8s timeout and returns an error result instead of raising.
 A failing memory must never take the host's conversation down.
@@ -159,6 +186,8 @@ The full failure analysis, measurements, tradeoffs and pitfalls are in
 [DESIGN_NOTES.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/DESIGN_NOTES.md).
 The temporal kernel is described in
 [MEMORY_V2.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/MEMORY_V2.md).
+The routine/vector research note is
+[ROUTINE_MEMORY_RESEARCH.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/ROUTINE_MEMORY_RESEARCH.md).
 
 ## What is shipped
 
@@ -170,7 +199,9 @@ The temporal kernel is described in
 | outer retrieval + time facet + cross-category | shipped |
 | short-term intentions with importance / TTL / anti-nag | shipped |
 | conservative write-time dedup | shipped |
-| `MergedMemory` facade + MCP tools | shipped (M2) |
+| `MergedMemory` facade + MCP tools | shipped |
+| episodes + retrospective search | shipped (1.6.0) |
+| weekly routines + in-turn probes | shipped (1.6.0) |
 | v1 → v2 migration script | shipped; dry-run by default |
 | graph memory | experimental, not wired into default retrieval |
 | `PersonaManager` default path switched to merged | not yet (M3) |
@@ -181,6 +212,9 @@ Known limits:
 - no UI, persona, or proactive messaging;
 - dedup is lexical and conservative; a low-overlap paraphrase can still create a second record;
 - 50 queries are still a small evaluation set;
+- routines are weekly fields, not a full RFC 5545 RRULE parser yet;
+- routine probes are hints; the host must ask and must report feedback;
+- there is no background scheduler and no automatic proactive message;
 - `PersonaManager` remains the legacy v1 pipeline; use `MergedMemory` or MCP
   for the merged path.
 

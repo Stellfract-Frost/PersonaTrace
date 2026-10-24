@@ -23,8 +23,10 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .episodes import EpisodeStore, has_retrospective
 from .facet import has_time_intent, humanize_due, render_time_line, time_bucket
 from .intentions import IntentStore
+from .routines import RoutineStore
 from .recall import rank
 from .schema import (
     ALL_CATEGORIES, DEFAULT_TZ, STABILITY_DAYS, BeliefIn, coerce_in,
@@ -150,6 +152,8 @@ class ContextPack:
     cross: List[Dict[str, Any]] = field(default_factory=list)
     due_review: List[Dict[str, Any]] = field(default_factory=list)
     agenda_lines: List[str] = field(default_factory=list)
+    episodes: List[Dict[str, Any]] = field(default_factory=list)
+    routine_probes: List[Dict[str, Any]] = field(default_factory=list)
     hidden_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -162,6 +166,8 @@ class ContextPack:
             "cross": self.cross,
             "due_review": self.due_review,
             "agenda_lines": self.agenda_lines,
+            "episodes": self.episodes,
+            "routine_probes": self.routine_probes,
             "hidden_count": self.hidden_count,
         }
 
@@ -181,10 +187,14 @@ class MergedMemory:
         llm: Any = None,
         embed_fn: Any = None,
         intents: Optional[IntentStore] = None,
+        episodes: Optional[EpisodeStore] = None,
+        routines: Optional[RoutineStore] = None,
         user_id: str = "default",
         redis_url: Optional[str] = None,
         sqlite_path: Optional[str] = None,
         intents_path: Optional[str] = None,
+        episodes_path: Optional[str] = None,
+        routines_path: Optional[str] = None,
         tz: str = DEFAULT_TZ,
         default_ttl_s: int = DEFAULT_TTL_S,
         write_sources: Iterable[str] = WRITE_SOURCES,
@@ -200,6 +210,10 @@ class MergedMemory:
         # default: one file for the whole memory, not one file per subsystem.
         resolved_intents_path = intents_path or (sqlite_path if memory is None else None) or ":memory:"
         self.intents = intents or IntentStore(resolved_intents_path, default_tz=self.tz)
+        resolved_episodes_path = episodes_path or (sqlite_path if memory is None else None) or ":memory:"
+        resolved_routines_path = routines_path or (sqlite_path if memory is None else None) or ":memory:"
+        self.episodes = episodes or EpisodeStore(resolved_episodes_path, default_tz=self.tz)
+        self.routines = routines or RoutineStore(resolved_routines_path, default_tz=self.tz)
         self._vec_cache: Dict[str, Sequence[float]] = {}
         # The 17-category stability table is a runtime config, not a kernel
         # fork. Existing beliefs keep their old stability; new ones get this.
@@ -223,6 +237,7 @@ class MergedMemory:
         source: str = "direct",
         now: Optional[datetime] = None,
         force: bool = False,
+        session_id: str = "",
     ) -> Dict[str, Any]:
         text = (user_msg or "").strip()
         if not text:
@@ -231,24 +246,63 @@ class MergedMemory:
             return {"status": "skipped", "reason": "source_not_allowed", "source": source}
 
         now_dt = _aware(now, self.tz)
+        # Store the raw turn even if extraction is throttled or returns nothing:
+        # the turn is provenance for later retrospective search.
+        episode = self.episodes.add(
+            self.user_id, text, reply,
+            session_id=session_id, source=source,
+            ts=now_dt.timestamp(),
+        )
+        episode_id = episode.id if episode else ""
+
         if not force:
             cold = int(self.memory.stats().get("beliefs", 0)) < 10
             if not self.memory.allow("merged_extract", 120 if cold else 600):
-                return {"status": "skipped", "reason": "throttled"}
+                return {"status": "skipped", "reason": "throttled", "episode_id": episode_id}
 
         extraction = self._extract(text, reply, now_dt)
         if extraction is None:
-            return {"status": "no_result"}
+            return {"status": "no_result", "episode_id": episode_id}
 
-        beliefs = self._write_beliefs(extraction.beliefs, text, now_dt)
+        beliefs = self._write_beliefs(extraction.beliefs, text, now_dt, episode_id=episode_id)
         intents = self._write_intentions(extraction.intentions, text, now_dt)
+        if episode_id and (beliefs or intents):
+            self.episodes.link(
+                episode_id,
+                belief_ids=[item.id for item in beliefs],
+                intention_ids=[item.id for item in intents],
+            )
         return {
             "status": "success" if (beliefs or intents) else "no_change",
             "beliefs": len(beliefs),
             "intentions": len(intents),
+            "episode_id": episode_id,
             "belief_ids": [item.id for item in beliefs],
             "intent_ids": [item.id for item in intents],
         }
+
+    def record_turn(
+        self,
+        user_msg: str,
+        reply: str = "",
+        *,
+        source: str = "direct",
+        session_id: str = "",
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Store a raw turn only; extraction/decisions stay on the host side."""
+        text = (user_msg or "").strip()
+        if not text:
+            return {"status": "skipped", "reason": "empty_user_message"}
+        if source not in self.write_sources:
+            return {"status": "skipped", "reason": "source_not_allowed", "source": source}
+        episode = self.episodes.add(
+            self.user_id, text, reply,
+            session_id=session_id, source=source,
+            ts=_aware(now, self.tz).timestamp(),
+        )
+        return {"status": "success" if episode else "skipped",
+                "episode_id": episode.id if episode else ""}
 
     def write(
         self,
@@ -257,6 +311,7 @@ class MergedMemory:
         *,
         source: str = "direct",
         now: Optional[datetime] = None,
+        episode_id: str = "",
     ) -> Dict[str, Any]:
         """Write already-structured items (MCP / host-side extraction).
 
@@ -285,9 +340,16 @@ class MergedMemory:
             except Exception:
                 invalid_intents += 1
 
-        written_beliefs = self._write_beliefs(valid_beliefs, "", now_dt)
+        written_beliefs = self._write_beliefs(valid_beliefs, "", now_dt, episode_id=episode_id)
         written_intents = self._write_intentions(valid_intents, "", now_dt)
+        if episode_id and (written_beliefs or written_intents):
+            self.episodes.link(
+                episode_id,
+                belief_ids=[item.id for item in written_beliefs],
+                intention_ids=[item.id for item in written_intents],
+            )
         return {
+            "episode_id": episode_id,
             "status": "success" if (written_beliefs or written_intents) else "no_change",
             "beliefs": len(written_beliefs),
             "intentions": len(written_intents),
@@ -301,6 +363,84 @@ class MergedMemory:
         """Structured short-term agenda. No prompt wording, no side effects."""
         now_dt = _aware(now, self.tz)
         return self.intents.select_agenda(self.user_id, now=now_dt, max_lines=max_lines)
+
+    def label_routine(
+        self,
+        action: str,
+        *,
+        time: str = "09:00",
+        weekdays: Iterable[int] = (),
+        interval: int = 1,
+        anchor_date: Any = None,
+        valid_from: Any = None,
+        valid_until: Any = None,
+        exdates: Iterable[Any] = (),
+        rdates: Iterable[Any] = (),
+        status: str = "candidate",
+        confidence: float = 0.55,
+        allow_probe: bool = True,
+        sensitivity: str = "",
+        note: str = "",
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Explicit user label for a weekly routine; no keyword action list."""
+        routine = self.routines.label(
+            self.user_id, action,
+            time=time, weekdays=weekdays, interval=interval,
+            anchor_date=anchor_date or _aware(now, self.tz).date(),
+            timezone=self.tz, valid_from=valid_from, valid_until=valid_until,
+            exdates=exdates, rdates=rdates, status=status,
+            confidence=confidence, allow_probe=allow_probe,
+            sensitivity=sensitivity, note=note,
+        )
+        return routine.to_dict() if routine else {"status": "skipped"}
+
+    def observe_routine(
+        self,
+        action: str,
+        *,
+        occurrence_date: Any = None,
+        time: Optional[str] = None,
+        weekdays: Optional[Iterable[int]] = None,
+        interval: int = 1,
+        episode_id: str = "",
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        now_dt = _aware(now, self.tz)
+        routine = self.routines.observe(
+            self.user_id, action, occurred_at=now_dt,
+            occurrence_date=occurrence_date, time=time, weekdays=weekdays,
+            interval=interval, timezone=self.tz, episode_id=episode_id,
+        )
+        return routine.to_dict() if routine else {"status": "skipped"}
+
+    def routine_probes(self, *, now: Optional[datetime] = None, limit: int = 3) -> List[Dict[str, Any]]:
+        return self.routines.probe(self.user_id, now=_aware(now, self.tz), limit=limit)
+
+    def routine_feedback(
+        self,
+        probe_id: str,
+        result: str,
+        *,
+        now: Optional[datetime] = None,
+        note: str = "",
+    ) -> Dict[str, Any]:
+        routine = self.routines.feedback(
+            probe_id, result, now=_aware(now, self.tz), note=note,
+        )
+        return routine.to_dict() if routine else {"status": "skipped"}
+
+    def episodes_search(
+        self,
+        query: str = "",
+        *,
+        after: Any = None,
+        before: Any = None,
+        limit: int = 3,
+    ) -> List[Dict[str, Any]]:
+        return self.episodes.search(
+            self.user_id, query, after=after, before=before, limit=limit,
+        )
 
     def _extract(self, user_msg: str, reply: str, now: datetime) -> Optional[MemoryExtraction]:
         if self.llm is None:
@@ -380,7 +520,14 @@ Return JSON only:
                 return row
         return None
 
-    def _write_beliefs(self, beliefs: List[BeliefIn], user_msg: str, now: datetime) -> List[Any]:
+    def _write_beliefs(
+        self,
+        beliefs: List[BeliefIn],
+        user_msg: str,
+        now: datetime,
+        *,
+        episode_id: str = "",
+    ) -> List[Any]:
         written = []
         index = self._existing_belief_index(now)
         for draft in beliefs[:4]:
@@ -400,7 +547,8 @@ Return JSON only:
                     track=track,
                     confidence=item.confidence,
                     reasoning=item.reasoning,
-                    evidence_text=item.evidence_text or user_msg[:4000],
+                    evidence_id=episode_id or None,
+                    evidence_text="" if episode_id else (item.evidence_text or user_msg[:4000]),
                     due_at_ts=due_ts,
                     time_kind=time_kind,
                     time_raw=time_raw,
@@ -480,6 +628,7 @@ Return JSON only:
         k: int = 4,
         max_agenda_lines: int = 6,
         mark_agenda: bool = False,
+        include_probes: bool = True,
     ) -> ContextPack:
         now_dt = _aware(now, self.tz)
         now_ts = now_dt.timestamp()
@@ -507,11 +656,25 @@ Return JSON only:
                 due_review.append(row)
         due_review = due_review[:3]
 
+        episodes: List[Dict[str, Any]] = []
+        if has_retrospective(query):
+            try:
+                episodes = self.episodes.search(self.user_id, query, limit=2)
+            except Exception:
+                logger.debug("episode search failed", exc_info=True)
+        probes: List[Dict[str, Any]] = []
+        if include_probes:
+            try:
+                probes = self.routines.probe(self.user_id, now=now_dt, limit=2)
+            except Exception:
+                logger.debug("routine probe failed", exc_info=True)
+
         return ContextPack(
             now=now_dt, query=query,
             pinned=ranked["pinned"], dated=dated, related=ranked["shown"],
             cross=ranked["cross"], due_review=due_review,
-            agenda_lines=agenda_lines, hidden_count=ranked["hidden_count"],
+            agenda_lines=agenda_lines, episodes=episodes,
+            routine_probes=probes, hidden_count=ranked["hidden_count"],
         )
 
     def inject(
@@ -534,6 +697,12 @@ Return JSON only:
             lines.append("【和日期有关的】")
             for row in pack.dated:
                 line = _dated_line(row, pack.now, self.tz)
+                if line:
+                    lines.append(line)
+        if pack.episodes:
+            lines.append("【上次聊到】")
+            for episode in pack.episodes:
+                line = _episode_line(episode)
                 if line:
                     lines.append(line)
         # Short-term tasks go before the long related tail: truncation must not
@@ -637,6 +806,15 @@ def _belief_line(row: Dict[str, Any], now: datetime, tz: str) -> str:
 
 def _dated_line(row: Dict[str, Any], now: datetime, tz: str) -> str:
     return render_time_line(row, now=now, tz=tz)
+
+
+def _episode_line(episode: Dict[str, Any]) -> str:
+    text = str(episode.get("user_msg") or "").strip().replace("\n", " ")
+    if not text:
+        return ""
+    stamp = str(episode.get("time") or "")[:16].replace("T", " ")
+    prefix = f"{stamp} " if stamp else ""
+    return f"- {prefix}你：{text[:100]}"
 
 
 def _expansion_line(row: Dict[str, Any]) -> str:

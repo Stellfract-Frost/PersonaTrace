@@ -45,6 +45,11 @@ API key, or network is required. Set `PERSONA_DB` to another path to move it;
 | `memory_remember` | write already-extracted beliefs / intentions; no LLM call |
 | `memory_context` | structured `pinned / dated / related / cross / agenda_lines` pack |
 | `memory_agenda` | read-only short-term agenda with due, importance and bucket |
+| `memory_turn` | store one raw turn; returns an `episode_id`; no extraction |
+| `memory_episodes` | retrospective raw-turn search by topic and time range |
+| `memory_routine_probe` | read-only weekly-routine probe candidates for this turn |
+| `memory_routine_feedback` | `confirmed / denied / skipped_today / unanswered / ended` |
+| `memory_routine_label` | explicit weekly routine with weekday/time/term/exceptions |
 
 ### Fields that matter
 
@@ -57,6 +62,10 @@ API key, or network is required. Set `PERSONA_DB` to another path to move it;
 - `hidden`: how many related items were squeezed out by the budget.
 - `agenda_lines`: short-term intentions; `[需主动]` marks the one item whose
   time bucket changed and may be raised proactively.
+- `episodes`: raw turns selected only for retrospective queries (`last time`,
+  `previously`, `还记得`).
+- `routine_probes`: in-turn probe candidates; the host decides whether to ask.
+  A probe is never sent by the server.
 
 ## 3. Minimal sequence
 
@@ -66,12 +75,12 @@ API key, or network is required. Set `PERSONA_DB` to another path to move it;
 {"jsonrpc":"2.0","id":2,"method":"tools/list"}
 {"jsonrpc":"2.0","id":3,"method":"tools/call",
  "params":{"name":"memory_remember","arguments":{
-   "beliefs":[{"category":"identity","label":"名字叫小陌"}],
-   "intentions":[{"action":"上课","due":"后天","importance":0.9}],
+   "beliefs":[{"category":"identity","label":"Name is Mo"}],
+   "intentions":[{"action":"attend class","due":"2026-10-25","importance":0.9}],
    "source":"direct"
  }}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call",
- "params":{"name":"memory_context","arguments":{"query":"我那个 deadline 是几号"}}}
+ "params":{"name":"memory_context","arguments":{"query":"When is my deadline?"}}}
 ```
 
 Protocol: newline-delimited JSON-RPC 2.0 over stdio. Notifications (no `id`)
@@ -88,8 +97,8 @@ produce no response.
 | No scope creep | no proactive messaging, no persona, no UI |
 
 The old five tools (`state / recall / observe / correct / predict`) still work
-against `MemoryV2`. The three merged tools use `MergedMemory` and share one
-SQLite file for beliefs and intentions.
+against `MemoryV2`. The merged tools use `MergedMemory` and share one SQLite
+file for beliefs, intentions, episodes and routines.
 
 ## 5. Tests
 

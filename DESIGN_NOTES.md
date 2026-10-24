@@ -150,6 +150,25 @@ while keeping `喜欢猫` / `喜欢猫毛` and `周五要演示` / `下周三演
 does not create an alias table: a low-lexical-overlap paraphrase can still
 produce a second record.
 
+### 3.9 Episode provenance
+
+Beliefs are conclusions; episodes are the turns they came from. `EpisodeStore`
+keeps `user_msg`, `ai_reply`, time and links to belief/intention ids in SQLite.
+`build_context()` includes episodes only for retrospective markers (`last time`,
+`previously`, `还记得`, `上次`); ordinary queries do not replay the transcript.
+New beliefs point at an `episode_id` instead of copying the turn into L0.
+
+### 3.10 Weekly routines are not daily habits
+
+A class is a weekly recurrence, not "same time every day". The routine stores
+weekday(s), local time, interval (1 or 2 for odd/even weeks), term validity,
+`exdates` (holidays/cancelled) and `rdates` (makeup). One observation creates a
+candidate; explicit recurrence or confirmation makes it weekly.
+
+A probe is returned only during a user-initiated turn inside the local window.
+It is a hint, not a message. `skipped_today` is not `denied`; silence is
+`unanswered`, never `confirmed`.
+
 ## 4. Pitfalls (the useful part)
 
 1. **A single `due` float is not a time model.** It cannot carry past,
@@ -188,7 +207,13 @@ produce a second record.
     body. Otherwise the model sees a partial list and no "there is more" signal.
 17. **SQLite key prefixes and TTL are easy to double-prefix.** Test restart and
     expiry, not just inserts.
-18. **Fifty queries are still small.** The 200/50 fixture is harder than the
+18. **Weekly is not daily.** "Attend class" needs weekday + time + term, not a
+    daily timer; otherwise every day becomes a false probe.
+19. **Silence is not a confirmation.** A missing feedback event must never
+    promote a candidate or erase a confirmed routine.
+20. **Do not hardcode actions.** `action` is free text; recurrence and probe
+    policy are generic. No `if action == "class"`.
+21. **Fifty queries are still small.** The 200/50 fixture is harder than the
     original 12/10 one, but it cannot support a claim like "23 points better"
     without a held-out set.
 
@@ -198,6 +223,8 @@ produce a second record.
 - no multi-tenant/auth model;
 - no graph unification of beliefs and intentions yet;
 - no full semantic alias merge; dedup is lexical and conservative;
+- no automatic background messages; probes are in-turn hints only;
+- no full RFC 5545 RRULE parser; weekly fields are normalized internally;
 - no 100+ query benchmark or CI gate;
 - no Redis requirement; SQLite is enough for a local single user.
 

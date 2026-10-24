@@ -198,3 +198,55 @@ def test_write_does_not_merge_similar_but_different_labels():
     mm.write(beliefs=[{"category": "likes", "label": "喜欢猫毛"}], now=NOW)
     assert len(mm.memory.state(as_of=NOW.timestamp())) == 2
 
+def test_remember_stores_episode_and_retrospective_context():
+    mm = make([{
+        "beliefs": [{"category": "identity", "label": "名字叫小陌"}],
+        "intentions": [],
+    }])
+    result = mm.remember("我叫小陌", now=NOW, force=True, session_id="s1")
+    assert result["episode_id"]
+    hits = mm.episodes_search("小陌")
+    assert hits and hits[0]["user_msg"] == "我叫小陌"
+    assert hits[0]["belief_ids"] == result["belief_ids"]
+
+    pack = mm.build_context("上次我们说了什么", now=NOW)
+    assert pack.episodes and pack.episodes[0]["user_msg"] == "我叫小陌"
+
+
+def test_record_turn_then_link_structured_beliefs():
+    mm = make([])
+    turn = mm.record_turn("每周二晚上去上课", session_id="s1", now=NOW)
+    assert turn["episode_id"]
+    written = mm.write(
+        beliefs=[{"category": "goals", "label": "每周二晚上去上课"}],
+        episode_id=turn["episode_id"], now=NOW,
+    )
+    assert written["episode_id"] == turn["episode_id"]
+    episode = mm.episodes_search("上课")[0]
+    assert written["belief_ids"][0] in episode["belief_ids"]
+
+
+def test_label_routine_appears_in_context_probe():
+    mm = make([])
+    labeled = mm.label_routine(
+        "attend class", time="10:00", weekdays=[5],
+        anchor_date="2026-10-16", status="candidate", now=NOW,
+    )
+    assert labeled["weekdays"] == [5]
+    pack = mm.build_context("随便", now=NOW)
+    assert pack.routine_probes
+    assert pack.routine_probes[0]["action"] == "attend class"
+    confirmed = mm.routine_feedback(pack.routine_probes[0]["probe_id"], "confirmed", now=NOW)
+    assert confirmed["status"] == "confirmed"
+
+
+def test_sqlite_path_persists_episodes(tmp_path):
+    path = str(tmp_path / "merged.db")
+    first = MergedMemory(llm=FakeLLM([]), user_id="u", tz=TZ, sqlite_path=path)
+    turn = first.record_turn("上次说要搬家", now=NOW)
+    assert turn["episode_id"]
+
+    second = MergedMemory(llm=FakeLLM([]), user_id="u", tz=TZ, sqlite_path=path)
+    hits = second.episodes_search("搬家")
+    assert hits and hits[0]["user_msg"] == "上次说要搬家"
+

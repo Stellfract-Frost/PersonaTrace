@@ -22,6 +22,8 @@ PersonaTrace 不是聊天机器人，也不是 agent harness。
 | Belief | 偏好、身份、约束、项目、目标、习惯 | 按类别算保持率；归档不删除 |
 | Intention | 后天要上课、周五交报告 | due + grace；`done / cancelled / expired` |
 | Evidence | 结论对应的原话 | 命中后才回表读 |
+| Episode | 原始 user/assistant turn | SQLite；按时间和字面回溯 |
+| Routine | 每周二 19:00 上课 | weekly recurrence + 学期/例外 + probe 状态 |
 | Mention | 别人说他最近在考研 | 和第一人称事实分开，衰减更快 |
 
 合并路径使用 **17 类 belief**，两轨：
@@ -36,11 +38,11 @@ persona: identity traits interests style_notes behavior_patterns
 
 ```text
 query
-  ├─ pinned：boundaries / constraints / identity
-  ├─ 语义：字面 IDF + 向量余弦（候选集内归一）
-  ├─ 时间桶：只对时间意图查询 due/range
-  ├─ 跨类别：从没入选的类别里补
-  └─ 回表：前几条读 reasoning + 原话
+  ├─ pinned: boundaries / constraints / identity
+  ├─ semantic: lexical IDF + vector cosine (candidate-set normalized)
+  ├─ time facet: due/range rows for time-intent queries
+  ├─ cross-category: items from categories not already selected
+  └─ evidence on demand: reasoning + original sentence for the first hits
 ```
 
 `score = (0.15 + 0.85 * similarity) * (0.35 + 0.65 * retention)`
@@ -52,7 +54,7 @@ query
 
 ```bash
 pip install personatrace
-pip install "personatrace[llm,vector]"   # 可选：LLM / embedding
+pip install "personatrace[llm,vector]"   # optional: LLM / embeddings
 ```
 
 Python 3.10+。belief 内核只用标准库；合并 facade 用 Pydantic；默认 SQLite，
@@ -67,33 +69,52 @@ from personatrace import MergedMemory
 
 memory = MergedMemory(
     user_id="alice",
-    sqlite_path="./personatrace.db",   # belief 和 intention 同一个文件
+    sqlite_path="./personatrace.db",   # one file for beliefs and intentions
 )
 
 memory.write(
     beliefs=[{
         "category": "identity",
-        "label": "名字叫小陌",
+        "label": "Name is Mo",
         "confidence": 0.9,
-        "reasoning": "用户自我介绍",
+        "reasoning": "user introduced themselves",
     }],
     intentions=[{
-        "action": "上课",
-        "due": "后天",
+        "action": "attend class",
+        "due": "2026-10-25",
         "importance": 0.9,
         "confidence": 0.8,
     }],
     source="direct",
 )
 
-context = memory.build_context("我那个 deadline 是几号")
+context = memory.build_context("When is my deadline?")
 print(context.agenda_lines)
-print(memory.inject("我那个 deadline 是几号"))
+print(memory.inject("When is my deadline?"))
 ```
 
 - `build_context()` 返回结构化数据，无副作用；
 - `inject()` 只是可选的 prompt 适配器，宿主可以自己渲染；
 - `source` 只允许 `direct / bridge / console`，主动回合不能写用户事实。
+
+### Turn 和 routine
+
+```python
+turn = memory.record_turn("I have class every Tuesday at 19:00", session_id="s1")
+memory.label_routine(
+    "attend class",
+    time="19:00",
+    weekdays=[2],              # Monday=1 ... Sunday=7
+    anchor_date="2026-10-20",
+    valid_until="2026-12-20",  # semester end
+    status="candidate",
+)
+pack = memory.build_context("Are we talking?")
+print(pack.routine_probes)     # hint only; the host decides whether to ask
+```
+
+Routine 是 weekly，不是 daily。一次观察只生成 candidate；明确标注或确认后才成为
+weekly。`skipped_today`、`denied`、沉默是三种不同状态。
 
 ## MCP
 
@@ -105,8 +126,10 @@ print(memory.inject("我那个 deadline 是几号"))
 }
 ```
 
-八个工具：`memory_state / memory_recall / memory_observe / memory_correct /
-memory_predict / memory_remember / memory_context / memory_agenda`。
+十三个工具：`memory_state / memory_recall / memory_observe / memory_correct /
+memory_predict / memory_remember / memory_context / memory_agenda /
+memory_turn / memory_episodes / memory_routine_probe / memory_routine_feedback /
+memory_routine_label`。
 合并工具默认 SQLite，不需要 Redis。每次调用 8 秒超时，出错返回错误结果，
 不抛异常拖垮宿主的对话。
 
@@ -147,12 +170,16 @@ python scripts/eval_recall.py
 | 外层检索 + 时间桶 + 跨类别 | 已发布 |
 | 短期 intention：importance / TTL / anti-nag | 已发布 |
 | 保守的词面去重 | 已发布 |
-| `MergedMemory` + MCP | 已发布（M2） |
+| `MergedMemory` + MCP | 已发布 |
+| episode + 回溯检索 | 已发布（1.6.0） |
+| weekly routine + in-turn probe | 已发布（1.6.0） |
 | v1 → v2 迁移脚本 | 有；默认 dry-run |
 | graph memory | 实验性，未接默认检索 |
 | `PersonaManager` 默认切到合并路径 | 未做（M3） |
 
 去重是词面且保守的；低重叠的复述仍可能产生第二条记录。50 条查询也仍然是小样本。
+Routine 目前是 weekly 字段，不是完整 RFC 5545 RRULE parser；probe 只是 hint，
+宿主必须自己问并回传 feedback；没有后台定时器，也不会自动主动发消息。
 
 明确不做：UI、人格、主动消息、多租户、聊天平台插件本体。
 
