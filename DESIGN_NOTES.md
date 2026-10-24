@@ -78,9 +78,10 @@ A single `due_at_ts` float cannot distinguish:
 - a fuzzy window (`年底前换工作`)
 
 The kernel now carries `time_kind` and `time_raw` alongside `due_at_ts`.
-`parse_due()` resolves common Chinese expressions in code; the model only
-supplies the surface phrase. Past expressions are refused before they can
-become deadlines.
+`parse_due()` resolves common Chinese and English expressions in code
+(`明天`, `下周三`, `today`, `in 3 days`, `2 weeks ago`, `next Monday`, ...);
+the model only supplies the surface phrase. Past expressions are refused before
+they can become deadlines.
 
 ### 3.3 Outer retrieval
 
@@ -243,3 +244,7 @@ python scripts/migrate_v1.py --db ./personatrace.db --apply
 The evaluation script prints the actual numbers; it does not hard-code the
 table above. If the embedding model is unavailable, it falls back to a hashing
 embedder and labels the run accordingly.
+
+The external LongMemEval temporal-reasoning run is documented separately in
+[LONGMEMEVAL.md](LONGMEMEVAL.md). It is not a full benchmark and uses the same
+model as answerer and judge; the hook caveat is recorded there.

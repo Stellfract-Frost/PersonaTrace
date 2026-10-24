@@ -250,3 +250,10 @@ def test_sqlite_path_persists_episodes(tmp_path):
     hits = second.episodes_search("搬家")
     assert hits and hits[0]["user_msg"] == "上次说要搬家"
 
+def test_english_temporal_query_opens_episode_context():
+    mm = make([])
+    mm.record_turn("I met my aunt last week", now=NOW)
+    pack = mm.build_context("How many weeks ago did I meet my aunt?", now=NOW)
+    assert pack.episodes
+    assert "aunt" in pack.episodes[0]["user_msg"]
+

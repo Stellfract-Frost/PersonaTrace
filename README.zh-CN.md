@@ -53,16 +53,21 @@ query
 ## 安装
 
 ```bash
+# Recommended: Chroma + an embedding model
+pip install "personatrace[vector]"
+
+# Minimal install: lexical/time fallback only
 pip install personatrace
-pip install "personatrace[llm,vector]"   # optional: LLM / embeddings
 ```
 
 Python 3.10+。belief 内核只用标准库；合并 facade 用 Pydantic；默认 SQLite，
 不需要 Redis。
 
-### 可选 Chroma episode 索引
+### 推荐装上 Chroma episode 索引
 
-SQLite 是 episode 的 source of truth；Chroma 只做语义候选：
+SQLite 是 episode 的 source of truth；Chroma 是推荐的语义候选索引。除非你明确
+只想要字面/时间兜底，否则建议安装 `vector` extra。真正提供语义能力的是
+embedding 模型，Chroma 负责索引，不负责状态。
 
 ```python
 from personatrace.chroma_index import ChromaEpisodeIndex
@@ -78,8 +83,9 @@ memory = MergedMemory(
 )
 ```
 
-Chroma 不可用时自动退回字面 + 时间检索。v1 的 `persona_items` collection 不变；
-episode 使用独立的 `episode_turns` collection。
+Chroma 不可用时自动退回字面 + 时间检索。这个兜底是刻意保留的，但对复述和更大的
+episode 库会更弱。v1 的 `persona_items` collection 不变；episode 使用独立的
+`episode_turns` collection。
 
 ## 快速开始：结构化写入
 
@@ -174,6 +180,23 @@ due 记录排到同样正确的语义记录前面；引用大 fixture 的数字�
 python scripts/eval_recall.py
 ```
 
+### LongMemEval temporal-reasoning 子集
+
+第一次外部评测，不是完整 LongMemEval，也不是 GPT-4o：
+
+```text
+133 questions (temporal-reasoning)   101 correct   75.9%
+20 questions (first run)              17 correct   85.0%
+20 questions (timed run)              16 correct   80.0%
+hybrid+rerank retrieval (133)         recall@3 86.8%, MRR 0.935
+index build 32,930 episodes           1,259.9 s; reuse 2.5 s
+```
+
+作答和判分都是 `deepseek-flash`，temperature 0，存在同模型自判偏差。双语
+episode hook 在 133 题中命中 132 题（20 题 smoke 为 20/20）；合并上下文和检索
+数字见
+[LONGMEMEVAL.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/LONGMEMEVAL.md)。
+
 ## 设计笔记
 
 失败分析、实测、取舍和踩坑在
@@ -187,13 +210,13 @@ python scripts/eval_recall.py
 |---|---|
 | v2 内核：保持率、双时态、证据、CAS | 已发布 |
 | SQLite 默认持久化 | 已发布 |
-| 17 类 belief + 中文 typed time | 已发布 |
+| 17 类 belief + 中英 typed time | 已发布 |
 | 外层检索 + 时间桶 + 跨类别 | 已发布 |
 | 短期 intention：importance / TTL / anti-nag | 已发布 |
 | 保守的词面去重 | 已发布 |
 | `MergedMemory` + MCP | 已发布 |
-| episode + 回溯检索 | 已发布（1.6.1） |
-| weekly routine + in-turn probe | 已发布（1.6.1） |
+| episode + 回溯检索 | 已发布（1.6.2） |
+| weekly routine + in-turn probe | 已发布（1.6.2） |
 | v1 → v2 迁移脚本 | 有；默认 dry-run |
 | graph memory | 实验性，未接默认检索 |
 | `PersonaManager` 默认切到合并路径 | 未做（M3） |

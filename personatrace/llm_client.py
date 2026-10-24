@@ -23,6 +23,9 @@ class LLMClient:
         self.api_key = config.llm_api_key
         self.base_url = config.llm_base_url.rstrip("/")
         self.model = config.llm_model
+        # Token accounting for the last call. Hosts that care about cost read
+        # this right after chat(); it is never used for control flow.
+        self.last_usage: Dict[str, Any] = {}
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -67,6 +70,7 @@ class LLMClient:
             resp = requests.post(url, json=payload, headers=headers, timeout=120)
             resp.raise_for_status()
             data = resp.json()
+            self.last_usage = data.get("usage") or {}
             return data["choices"][0]["message"]["content"]
         except requests.exceptions.RequestException as e:
             logger.error("LLM API call failed: %s", e)

@@ -143,3 +143,19 @@ def test_due_for_write_guards_narrative_and_uses_forward_fallback():
     typed = due_for_write(explicit, NOW, TZ)
     assert typed is not None
     assert datetime.fromtimestamp(typed.at, Z).strftime("%Y-%m-%d") == "2026-10-28"
+
+def test_english_relative_due_is_supported():
+    assert parse_due("every Tuesday", NOW, TZ) is None
+    assert parse_due("tomorrow", NOW, TZ).kind == "due"
+    assert parse_due("yesterday", NOW, TZ).kind == "past"
+    assert parse_due("in 3 days", NOW, TZ).kind == "due"
+    assert parse_due("2 weeks ago", NOW, TZ).kind == "past"
+    assert parse_due("next Monday", NOW, TZ).kind == "due"
+    assert parse_due("last Friday", NOW, TZ).kind == "past"
+    assert parse_due("last night", NOW, TZ).kind == "past"
+    assert parse_due("end of month", NOW, TZ).kind == "due"
+
+    tomorrow = parse_due("tomorrow at 8pm", NOW, TZ)
+    assert tomorrow is not None
+    assert datetime.fromtimestamp(tomorrow.at, Z).strftime("%H:%M") == "20:00"
+

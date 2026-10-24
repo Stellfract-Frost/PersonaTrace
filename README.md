@@ -54,19 +54,22 @@ conditional bypass, not a second retriever.
 ## Install
 
 ```bash
-pip install personatrace
-# optional embedding / LLM / API layers
-pip install "personatrace[llm,vector]"
-```
+# Recommended: Chroma + an embedding model for semantic memory
+pip install "personatrace[vector]"
 
+# Minimal install: lexical/time fallback only
+pip install personatrace
+```
 
 Python 3.10+. The core belief kernel uses the standard library. The merged
 facade uses Pydantic; the default local store is SQLite. Redis is optional.
 
-### Optional Chroma episode index
+### Recommended Chroma episode index
 
-SQLite owns the episode rows and all state. Chroma is an optional candidate
-index for semantic retrospective search:
+SQLite owns the episode rows and all state. Chroma is the recommended candidate
+index for semantic retrospective search; install it unless you explicitly want
+the lexical/time-only fallback. The embedding model is what makes semantic recall
+work; Chroma is the index, not the source of truth.
 
 ```python
 from personatrace.chroma_index import ChromaEpisodeIndex
@@ -83,7 +86,9 @@ memory = MergedMemory(
 ```
 
 If Chroma is unavailable, `EpisodeStore` falls back to lexical + time search.
-The v1 `persona_items` collection is separate; episodes use `episode_turns`.
+That fallback is intentionally usable, but it is weaker for paraphrases and
+larger episode archives. The v1 `persona_items` collection is separate; episodes
+use `episode_turns`.
 
 ## Quick start: structured memory
 
@@ -202,6 +207,23 @@ python scripts/eval_recall.py
 python scripts/eval_recall.py --no-embed
 ```
 
+### LongMemEval temporal-reasoning subset
+
+First external run, not the full benchmark and not GPT-4o:
+
+```text
+133 questions (temporal-reasoning)     101 correct   75.9%
+20 questions (first run)                 17 correct   85.0%
+20 questions (timed run)                 16 correct   80.0%
+retrieval hybrid+rerank (133)           recall@3 86.8%, MRR 0.935
+build 32,930 episodes                   1,259.9 s; reuse 2.5 s
+```
+
+Answerer and judge are both `deepseek-flash` at temperature 0, so self-judge
+bias applies. The bilingual episode hook opens on 132/133 questions (20/20 on
+the smoke set). The merged-context gate and the retrieval numbers are explained
+in [LONGMEMEVAL.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/LONGMEMEVAL.md).
+
 ## Design notes
 
 The full failure analysis, measurements, tradeoffs and pitfalls are in
@@ -217,13 +239,13 @@ The routine/vector research note is
 |---|---|
 | v2 kernel: retention, bi-temporal state, evidence, CAS guard | shipped |
 | SQLite persistence by default | shipped |
-| 17-category belief contract + Chinese typed time | shipped |
+| 17-category belief contract + Chinese/English typed time | shipped |
 | outer retrieval + time facet + cross-category | shipped |
 | short-term intentions with importance / TTL / anti-nag | shipped |
 | conservative write-time dedup | shipped |
 | `MergedMemory` facade + MCP tools | shipped |
-| episodes + retrospective search | shipped (1.6.1) |
-| weekly routines + in-turn probes | shipped (1.6.1) |
+| episodes + retrospective search | shipped (1.6.2) |
+| weekly routines + in-turn probes | shipped (1.6.2) |
 | v1 → v2 migration script | shipped; dry-run by default |
 | graph memory | experimental, not wired into default retrieval |
 | `PersonaManager` default path switched to merged | not yet (M3) |

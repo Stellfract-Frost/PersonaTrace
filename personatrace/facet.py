@@ -22,10 +22,26 @@ from zoneinfo import ZoneInfo
 DEFAULT_TZ = "Asia/Shanghai"
 
 TIME_INTENT = re.compile(
-    r"几号|哪天|什么时候|截止|deadline|ddl|日程|安排|到期|之前|之后",
+    r"几号|哪天|什么时候|截止|deadline|ddl|日程|安排|到期|之前|之后"
+    # English temporal expressions. Without these the facet never opens on an
+    # English query, so "how many days between X and Y" gets no time bucket.
+    r"|how many (?:day|week|month|year)s?"
+    r"|when did|what date|which day|how long"
+    r"|\bago\b|last (?:week|month|year|night)"
+    r"|between .+ and |more recently|most recent"
+    r"|\b(?:today|tomorrow|yesterday|tonight)\b"
+    r"|\b(?:this|next|last)\s+(?:week|month|year)\b"
+    r"|\b(?:on|by|before|after)\s+(?:mon|tue|wed|thu|fri|sat|sun)",
     re.IGNORECASE,
 )
-TIME_HABIT = re.compile(r"平时|每天|一般|习惯|通常|总是")
+TIME_HABIT = re.compile(
+    r"平时|每天|一般|习惯|通常|总是"
+    r"|\bevery\s+(?:day|week|month|year|morning|night)\b"
+    r"|\beveryday\b|\beach\s+day\b|\bdaily\b"
+    r"|\busually\b|\bnormally\b|\balways\b|\btypically\b"
+    r"|\btend\s+to\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -123,6 +139,7 @@ def humanize_due(
     tz: str = DEFAULT_TZ,
     kind: str = "due",
     raw: str = "",
+    lang: str = "zh",
 ) -> str:
     """Absolute date first, plus a relative label and a weekday.
 
@@ -136,8 +153,21 @@ def humanize_due(
     now_local = now_dt
     delta_days = (local.date() - now_local.date()).days
     date_text = local.strftime("%Y-%m-%d")
-    weekday = "周" + "一二三四五六日"[local.weekday()]
+    if (lang or "zh").lower().startswith("en"):
+        weekday_en = local.strftime("%A")
+        if kind == "range" and raw:
+            return f"by {raw} ({date_text}, {weekday_en})"
+        if delta_days == 0:
+            return f"due today ({date_text}, {weekday_en})"
+        if delta_days == 1:
+            return f"due tomorrow ({date_text}, {weekday_en})"
+        if delta_days == 2:
+            return f"due in 2 days ({date_text}, {weekday_en})"
+        if delta_days < 0:
+            return f"overdue {abs(delta_days)} days ({date_text}, {weekday_en})"
+        return f"due {date_text} ({weekday_en}, in {delta_days} days)"
 
+    weekday = "周" + "一二三四五六日"[local.weekday()]
     if kind == "range" and raw:
         return f"截止 {raw}（{date_text}，{weekday}）"
     if delta_days == 0:
@@ -156,6 +186,7 @@ def render_time_line(
     *,
     now: Optional[datetime] = None,
     tz: str = DEFAULT_TZ,
+    lang: str = "zh",
 ) -> str:
     due = _row_due(row)
     label = str(row.get("label", "")).strip()
@@ -165,6 +196,7 @@ def render_time_line(
         due, now=now, tz=tz,
         kind=str(row.get("time_kind") or "due"),
         raw=str(row.get("time_raw") or ""),
+        lang=lang,
     )
     return f"- {label} — {human}" if human else f"- {label}"
 
@@ -175,8 +207,9 @@ def time_bucket_lines(
     now: Optional[datetime] = None,
     tz: str = DEFAULT_TZ,
     limit: int = 2,
+    lang: str = "zh",
 ) -> List[str]:
     return [
         line for row in time_bucket(rows, now=now, tz=tz, limit=limit)
-        if (line := render_time_line(row, now=now, tz=tz))
+        if (line := render_time_line(row, now=now, tz=tz, lang=lang))
     ]

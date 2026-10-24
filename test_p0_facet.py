@@ -73,3 +73,18 @@ def test_time_bucket_lines():
     lines = time_bucket_lines(ROWS, now=NOW, tz=TZ, limit=2)
     assert len(lines) == 2
     assert all(line.startswith("- ") for line in lines)
+
+def test_english_time_intent_and_habit():
+    assert has_time_intent("How many weeks ago did I meet her?")
+    assert has_time_intent("What did I do yesterday?")
+    assert not has_time_intent("I usually go to class at 9am")
+    assert detect_time_intent("I usually go to class at 9am").is_habit
+    assert not has_time_intent("Every Tuesday I go to class")
+
+
+def test_humanize_due_english():
+    assert humanize_due(ts(10, 23), now=NOW, tz=TZ, lang="en") == "due today (2026-10-23, Friday)"
+    assert humanize_due(ts(10, 16), now=NOW, tz=TZ, lang="en") == "overdue 7 days (2026-10-16, Friday)"
+    line = render_time_line(ROWS[0], now=NOW, tz=TZ, lang="en")
+    assert "due today" in line
+

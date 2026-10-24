@@ -112,3 +112,11 @@ def test_chroma_episode_index_if_available(tmp_path):
     index.delete([episode.id])
     assert index.count() == 0
 
+def test_english_temporal_questions_reach_the_episode_branch():
+    assert has_retrospective("How many weeks ago did I meet my aunt?")
+    assert has_retrospective("Which event happened first?")
+    assert has_retrospective("How many months have passed since the move?")
+    assert has_retrospective("What did I do before the trip?")
+    assert has_retrospective("What is the order of the three trips?")
+    assert has_retrospective("What was the airline I flew with last Saturday?")
+

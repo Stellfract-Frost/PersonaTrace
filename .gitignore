@@ -4,6 +4,7 @@ __pycache__/
 build/
 dist/
 persona_data/
+data/
 .pytest_cache/
 _data/
 .claude/

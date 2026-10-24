@@ -256,8 +256,182 @@ def _typed(day: date, clock: Optional[datetime], now: datetime, raw: str,
     )
 
 
+_EN_WEEKDAYS = {
+    "monday": 0, "mon": 0,
+    "tuesday": 1, "tue": 1, "tues": 1,
+    "wednesday": 2, "wed": 2,
+    "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
+    "friday": 4, "fri": 4,
+    "saturday": 5, "sat": 5,
+    "sunday": 6, "sun": 6,
+}
+_EN_MONTHS = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10, "november": 11, "nov": 11,
+    "december": 12, "dec": 12,
+}
+_EN_NUMBERS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
+    "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+
+
+def _en_number(text: str) -> Optional[int]:
+    text = (text or "").strip().lower()
+    if text.isdigit():
+        return int(text)
+    return _EN_NUMBERS.get(text)
+
+
+def _en_clock(text: str, day: date, tz: str) -> Optional[datetime]:
+    match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text, re.IGNORECASE)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return None
+    if match.group(3).lower() == "pm" and hour < 12:
+        hour += 12
+    if match.group(3).lower() == "am" and hour == 12:
+        hour = 0
+    return datetime.combine(day, dt_time(hour, minute), tzinfo=_zone(tz))
+
+
+def _month_end(year: int, month: int) -> date:
+    return date(year, month, calendar.monthrange(year, month)[1])
+
+
+def _parse_english_due(raw: str, now: datetime, tz: str) -> Optional[TypedTime]:
+    text = re.sub(r"\s+", " ", raw.lower()).strip(" .,!?")
+    if not text:
+        return None
+
+    # Recurring expressions are routines, not deadlines.
+    if re.search(r"\b(?:every|each)\s+(?:day|week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", text):
+        return None
+
+    def make(day: date, force_past: bool = False) -> TypedTime:
+        clock = _en_clock(text, day, tz)
+        return _typed(day, clock, now, raw, tz, force_past=force_past)
+
+    if "day after tomorrow" in text:
+        return make(now.date() + timedelta(days=2))
+    if "day before yesterday" in text:
+        return make(now.date() - timedelta(days=2), force_past=True)
+    for word, offset in (("today", 0), ("tomorrow", 1), ("yesterday", -1)):
+        if re.search(rf"\b{word}\b", text):
+            return make(now.date() + timedelta(days=offset), force_past=offset < 0)
+    if re.search(r"\btonight\b", text):
+        return make(now.date())
+    if re.search(r"\blast night\b", text):
+        return make(now.date() - timedelta(days=1), force_past=True)
+
+    match = re.search(r"\bin\s+([a-z]+|\d+)\s+(day|week|month|year)s?\b", text)
+    if match:
+        count = _en_number(match.group(1))
+        if count is None:
+            return None
+        unit = match.group(2)
+        if unit == "day":
+            return make(now.date() + timedelta(days=count))
+        if unit == "week":
+            return make(now.date() + timedelta(days=7 * count))
+        if unit == "month":
+            return make(_add_months(now.date(), count))
+        return make(_add_months(now.date(), 12 * count))
+
+    match = re.search(r"\b([a-z]+|\d+)\s+(day|week|month|year)s?\s+(?:ago|from now)\b", text)
+    if match:
+        count = _en_number(match.group(1))
+        if count is None:
+            return None
+        unit = match.group(2)
+        if unit == "day":
+            day = now.date() - timedelta(days=count) if "ago" in text else now.date() + timedelta(days=count)
+        elif unit == "week":
+            day = now.date() - timedelta(days=7 * count) if "ago" in text else now.date() + timedelta(days=7 * count)
+        elif unit == "month":
+            day = _add_months(now.date(), -count if "ago" in text else count)
+        else:
+            day = _add_months(now.date(), -12 * count if "ago" in text else 12 * count)
+        return make(day, force_past="ago" in text)
+
+    match = re.search(r"\b(next|last|this)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\b", text)
+    if match:
+        prefix, name = match.group(1), match.group(2)
+        target = _EN_WEEKDAYS[name]
+        if prefix == "next":
+            day = _next_weekday(now.date(), target, include_today=False)
+        elif prefix == "last":
+            day = now.date() - timedelta(days=((now.weekday() - target - 1) % 7) + 1)
+        else:
+            monday = now.date() - timedelta(days=now.weekday())
+            day = monday + timedelta(days=target)
+        return make(day, force_past=prefix == "last")
+
+    match = re.search(r"\b(?:on|by|before|after)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\b", text)
+    if match:
+        return make(_next_weekday(now.date(), _EN_WEEKDAYS[match.group(1)], include_today=True))
+
+    match = re.fullmatch(r"(?:on\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)", text)
+    if match:
+        return make(_next_weekday(now.date(), _EN_WEEKDAYS[match.group(1)], include_today=True))
+
+    match = re.search(r"\b(next|last|this)\s+weekend\b", text)
+    if match:
+        prefix = match.group(1)
+        monday = now.date() - timedelta(days=now.weekday())
+        shift = {"next": 7, "last": -7, "this": 0}[prefix]
+        return make(monday + timedelta(days=6 + shift), force_past=prefix == "last")
+
+    match = re.search(r"\b(next|last|this)\s+(week|month|year)\b", text)
+    if match:
+        prefix, unit = match.group(1), match.group(2)
+        if unit == "week":
+            monday = now.date() - timedelta(days=now.weekday())
+            shift = {"next": 7, "last": -7, "this": 0}[prefix]
+            day = monday + timedelta(days=6 + shift)
+        elif unit == "month":
+            shift = {"next": 1, "last": -1, "this": 0}[prefix]
+            month_index = now.month - 1 + shift
+            year = now.year + month_index // 12
+            month = month_index % 12 + 1
+            day = _month_end(year, month)
+        else:
+            year = now.year + {"next": 1, "last": -1, "this": 0}[prefix]
+            day = date(year, 12, 31)
+        return make(day, force_past=prefix == "last")
+
+    if re.search(r"\bend of (?:the )?(?:month|year)\b", text):
+        if "year" in text:
+            return make(date(now.year, 12, 31))
+        return make(_month_end(now.year, now.month))
+
+    match = re.search(
+        r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\b",
+        text,
+    )
+    if match:
+        return make(_next_weekday(now.date(), _EN_WEEKDAYS[match.group(1)], include_today=True))
+
+    match = re.fullmatch(
+        r"([a-z]+)\s+(\d{1,2})(?:,\s*(\d{4}))?", text, re.IGNORECASE,
+    )
+    if match and match.group(1).lower() in _EN_MONTHS:
+        month = _EN_MONTHS[match.group(1).lower()]
+        year = int(match.group(3) or now.year)
+        try:
+            return make(date(year, month, int(match.group(2))))
+        except ValueError:
+            return None
+    return None
+
+
 def parse_due(text: str, now: Optional[datetime] = None, tz: str = DEFAULT_TZ) -> Optional[TypedTime]:
-    """Parse common Chinese time expressions into a typed slot.
+    """Parse common Chinese and English time expressions into a typed slot.
 
     Returns ``None`` when there is no date, or when the expression is a habit
     (``每天十点睡``). Explicit past expressions return ``kind="past"`` so the
@@ -273,6 +447,12 @@ def parse_due(text: str, now: Optional[datetime] = None, tz: str = DEFAULT_TZ) -
     # parse_due intentionally returns None so they never enter the due bucket.
     if re.search(r"每(?:天|日|周|星期|礼拜|月)", raw):
         return None
+    if re.search(r"\b(?:every|each)\s+(?:day|week|month|year|morning|night)\b", raw, re.IGNORECASE):
+        return None
+
+    english = _parse_english_due(raw, now, tz)
+    if english is not None:
+        return english
 
     # ISO dates are the language-neutral form used by APIs/MCP examples.
     iso = re.fullmatch(

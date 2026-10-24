@@ -32,6 +32,19 @@ _WORD = re.compile(r"[a-zA-Z0-9_]+")
 RETROSPECTIVE_MARKERS = (
     "上次", "之前", "那天", "上周", "昨天", "还记得", "聊过", "说过",
     "以前", "当时", "last time", "previously", "remember when",
+    # English temporal recall. Without these the episode branch only fires on
+    # Chinese questions, which makes retrospective search unreachable for an
+    # English conversation log.
+    "ago", "remember", "recall", "back then", "used to", "earlier",
+    "last week", "last month", "last year", "yesterday", "overnight",
+    "how many", "when did", "how long", "between",
+    "what date", "which day", "which event", "happened first",
+    "in order", "order from first", "more recently", "most recent",
+    "before", "after", "this week", "next week", "last week",
+    "order", "first", "last monday", "last tuesday", "last wednesday",
+    "last thursday", "last friday", "last saturday", "last sunday",
+    "past month", "past week", "past weekend", "past few", "past two",
+    "past three", "what was the date", "what was the", "how old", "most in",
 )
 
 
