@@ -274,6 +274,27 @@ def parse_due(text: str, now: Optional[datetime] = None, tz: str = DEFAULT_TZ) -
     if re.search(r"每(?:天|日|周|星期|礼拜|月)", raw):
         return None
 
+    # ISO dates are the language-neutral form used by APIs/MCP examples.
+    iso = re.fullmatch(
+        r"(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ](\d{1,2}):(\d{2})(?::\d{2})?)?",
+        raw,
+    )
+    if iso:
+        try:
+            day = date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+        except ValueError:
+            return None
+        clock = None
+        if iso.group(4) is not None:
+            try:
+                clock = datetime.combine(
+                    day, dt_time(int(iso.group(4)), int(iso.group(5))),
+                    tzinfo=_zone(tz),
+                )
+            except ValueError:
+                return None
+        return _typed(day, clock, now, raw)
+
     match = re.search(r"上周([一二三四五六日天])", raw)
     if match:
         monday = now.date() - timedelta(days=now.weekday()) - timedelta(days=7)

@@ -87,13 +87,13 @@ class Episode:
     belief_ids: List[str] = field(default_factory=list)
     intention_ids: List[str] = field(default_factory=list)
 
-    def to_dict(self, include_reply: bool = True) -> Dict[str, Any]:
+    def to_dict(self, include_reply: bool = True, tz: Optional[str] = None) -> Dict[str, Any]:
         return {
             "id": self.id,
             "user_id": self.user_id,
             "session_id": self.session_id,
             "ts": self.ts,
-            "time": datetime.fromtimestamp(self.ts, _zone(DEFAULT_TZ)).isoformat(),
+            "time": datetime.fromtimestamp(self.ts, _zone(tz or DEFAULT_TZ)).isoformat(),
             "user_msg": self.user_msg,
             "ai_reply": self.ai_reply if include_reply else "",
             "source": self.source,
@@ -274,12 +274,12 @@ class EpisodeStore:
             return []
         q = (query or "").strip()
         if not q:
-            return [e.to_dict(include_reply) for e in episodes[:max(1, int(limit))]]
+            return [e.to_dict(include_reply, self.tz) for e in episodes[:max(1, int(limit))]]
 
         q_tokens = _tokens(q)
         q_set = set(q_tokens)
         if not q_set:
-            return [e.to_dict(include_reply) for e in episodes[:max(1, int(limit))]]
+            return [e.to_dict(include_reply, self.tz) for e in episodes[:max(1, int(limit))]]
         docs = [(e, _tokens(e.user_msg + " " + e.ai_reply)) for e in episodes]
         df = {tok: 0 for tok in q_set}
         for _ep, toks in docs:
@@ -302,7 +302,7 @@ class EpisodeStore:
             scored.append((score, ep))
         scored.sort(key=lambda item: (-item[0], -item[1].ts))
         return [
-            {**ep.to_dict(include_reply), "score": round(score, 4)}
+            {**ep.to_dict(include_reply, self.tz), "score": round(score, 4)}
             for score, ep in scored[:max(1, int(limit))]
         ]
 

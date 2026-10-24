@@ -104,6 +104,18 @@ def test_year_end_is_range():
     assert item.due_ts == item.end
 
 
+def test_iso_date_is_a_language_neutral_due():
+    item = parse_due("2026-10-25", NOW, TZ)
+    assert item is not None and item.kind == "due"
+    assert datetime.fromtimestamp(item.at, Z).strftime("%Y-%m-%d") == "2026-10-25"
+
+    timed = parse_due("2026-10-25 19:00", NOW, TZ)
+    assert timed is not None and timed.confidence == 1.0
+    assert datetime.fromtimestamp(timed.at, Z).strftime("%H:%M") == "19:00"
+
+    assert parse_due("2026-10-20", NOW, TZ).kind == "past"
+
+
 def test_recurring_is_not_a_deadline():
     assert parse_due("每天十点睡", NOW, TZ) is None
     assert parse_due("每周三上课", NOW, TZ) is None
