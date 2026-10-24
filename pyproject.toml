@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "personatrace"
-version = "1.6.2"
+version = "1.6.3"
 description = "A memory layer for what is still true, what is due, and why it was stored."
 readme = "README.md"
 requires-python = ">=3.10"

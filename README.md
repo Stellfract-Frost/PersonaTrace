@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![MCP](https://img.shields.io/badge/MCP-ready-4B5563)](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/MCP.md)
+[![MCP](https://img.shields.io/badge/MCP-ready-4B5563)](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/MCP.md)
 
 **A memory layer for what is still true, what is due, and why it was stored.**
 
@@ -181,7 +181,7 @@ no Redis or server setup is required.
 Every call has an 8s timeout and returns an error result instead of raising.
 A failing memory must never take the host's conversation down.
 
-See [MCP.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/MCP.md).
+See [MCP.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/MCP.md).
 
 ## Evaluation
 
@@ -222,16 +222,16 @@ build 32,930 episodes                   1,259.9 s; reuse 2.5 s
 Answerer and judge are both `deepseek-flash` at temperature 0, so self-judge
 bias applies. The bilingual episode hook opens on 132/133 questions (20/20 on
 the smoke set). The merged-context gate and the retrieval numbers are explained
-in [LONGMEMEVAL.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/LONGMEMEVAL.md).
+in [LONGMEMEVAL.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/LONGMEMEVAL.md).
 
 ## Design notes
 
 The full failure analysis, measurements, tradeoffs and pitfalls are in
-[DESIGN_NOTES.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/DESIGN_NOTES.md).
+[DESIGN_NOTES.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/DESIGN_NOTES.md).
 The temporal kernel is described in
-[MEMORY_V2.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/MEMORY_V2.md).
+[MEMORY_V2.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/MEMORY_V2.md).
 The routine/vector research note is
-[ROUTINE_MEMORY_RESEARCH.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/ROUTINE_MEMORY_RESEARCH.md).
+[ROUTINE_MEMORY_RESEARCH.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/ROUTINE_MEMORY_RESEARCH.md).
 
 ## What is shipped
 
@@ -244,8 +244,8 @@ The routine/vector research note is
 | short-term intentions with importance / TTL / anti-nag | shipped |
 | conservative write-time dedup | shipped |
 | `MergedMemory` facade + MCP tools | shipped |
-| episodes + retrospective search | shipped (1.6.2) |
-| weekly routines + in-turn probes | shipped (1.6.2) |
+| episodes + retrospective search | shipped (1.6.3) |
+| weekly routines + in-turn probes | shipped (1.6.3) |
 | v1 → v2 migration script | shipped; dry-run by default |
 | graph memory | experimental, not wired into default retrieval |
 | `PersonaManager` default path switched to merged | not yet (M3) |

@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![MCP](https://img.shields.io/badge/MCP-ready-4B5563)](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/MCP.md)
+[![MCP](https://img.shields.io/badge/MCP-ready-4B5563)](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/MCP.md)
 
 **一个记得「现在还成立什么、什么快到期、为什么记它」的记忆层。**
 
@@ -195,14 +195,14 @@ index build 32,930 episodes           1,259.9 s; reuse 2.5 s
 作答和判分都是 `deepseek-flash`，temperature 0，存在同模型自判偏差。双语
 episode hook 在 133 题中命中 132 题（20 题 smoke 为 20/20）；合并上下文和检索
 数字见
-[LONGMEMEVAL.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/LONGMEMEVAL.md)。
+[LONGMEMEVAL.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/LONGMEMEVAL.md)。
 
 ## 设计笔记
 
 失败分析、实测、取舍和踩坑在
-[DESIGN_NOTES.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/DESIGN_NOTES.md)；
+[DESIGN_NOTES.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/DESIGN_NOTES.md)；
 时序内核在
-[MEMORY_V2.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/MEMORY_V2.md)。
+[MEMORY_V2.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/MEMORY_V2.md)。
 
 ## 现状与边界
 
@@ -215,8 +215,8 @@ episode hook 在 133 题中命中 132 题（20 题 smoke 为 20/20）；合并�
 | 短期 intention：importance / TTL / anti-nag | 已发布 |
 | 保守的词面去重 | 已发布 |
 | `MergedMemory` + MCP | 已发布 |
-| episode + 回溯检索 | 已发布（1.6.2） |
-| weekly routine + in-turn probe | 已发布（1.6.2） |
+| episode + 回溯检索 | 已发布（1.6.3） |
+| weekly routine + in-turn probe | 已发布（1.6.3） |
 | v1 → v2 迁移脚本 | 有；默认 dry-run |
 | graph memory | 实验性，未接默认检索 |
 | `PersonaManager` 默认切到合并路径 | 未做（M3） |

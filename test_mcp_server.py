@@ -213,7 +213,7 @@ def test_stdio_end_to_end():
     ]
     stdin = "\n".join(json.dumps(r, ensure_ascii=False) for r in requests) + "\n"
     proc = subprocess.run(
-        [sys.executable, "mcp_server.py"],
+        [sys.executable, "-m", "personatrace.mcp_server"],
         input=stdin, capture_output=True, text=True, timeout=60, cwd=here,
     )
     assert proc.returncode == 0, proc.stderr[-800:]

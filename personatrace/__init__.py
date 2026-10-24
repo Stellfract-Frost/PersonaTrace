@@ -1,27 +1,37 @@
-"""
-PersonaTrace — User profile extraction and management toolkit.
+"""PersonaTrace — merged memory layer.
 
-分两层，按需加载：
-- 零依赖内核：`personatrace.memory_v2`（时序信条 / 艾宾浩斯保持率 / 双时态）
-- 重组件：VectorStore（chromadb）、PersonaManager（LLM 抽取）等，只有用到才 import
+Primary API:
+    from personatrace import MergedMemory
 
-Quick start（零依赖内核）：
-    from personatrace.memory_v2 import MemoryV2
-    mem = MemoryV2(user_id="qq:12345")
-    mem.observe("goals", "交付 V1.0")
+    memory = MergedMemory(
+        user_id="alice",
+        sqlite_path="./personatrace.db",
+    )
+    memory.write(
+        beliefs=[{"category": "identity", "label": "Name is Mo"}],
+        source="direct",
+    )
+    memory.record_turn("I have class every Tuesday at 19:00", session_id="s1")
+    pack = memory.build_context("What is due next week?")
 
-Quick start（完整管线，需要 [llm]/[vector] extras）：
-    from personatrace import PersonaManager, PersonaConfig
-    config = PersonaConfig(llm_api_key="sk-...", llm_model="gpt-4o")
-    manager = PersonaManager(config)
-    manager.ingest_text("I'm a Python developer who enjoys running and reading")
+Storage split:
+- ``MergedMemory``: facade over beliefs, intentions, episodes and routines.
+- ``MemoryV2``: belief kernel (retention, bi-temporal state, evidence).
+- ``IntentStore``: short-term commitments.
+- ``EpisodeStore``: raw turns and retrospective search.
+- ``RoutineStore``: weekly schedules and in-turn probe state.
+- ``ChromaEpisodeIndex``: optional semantic episode index.
+
+Legacy v1 pieces (``PersonaManager``, ``VectorStore``, ``extractor``,
+``formatter``) remain only for migration and the existing Chroma label index.
+They are not the primary write/read path.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-__version__ = "1.6.2"
+__version__ = "1.6.3"
 
 # 轻量、无外部依赖的成员（导入本包时不触发 chromadb / requests）
 from .config import PersonaConfig
@@ -64,6 +74,21 @@ _LAZY = {
 }
 
 __all__ = [
+    "MergedMemory",
+    "ContextPack",
+    "EpisodeStore",
+    "Episode",
+    "ChromaEpisodeIndex",
+    "RoutineStore",
+    "Routine",
+    "IntentStore",
+    "MemoryV2",
+    "MemoryBackend",
+    "SQLiteBackend",
+    "Belief",
+    "parse_due",
+    "rank",
+    # v1 migration/compatibility surface
     "PersonaConfig",
     "PersonaItem",
     "ProfileData",
@@ -72,7 +97,16 @@ __all__ = [
     "PERSONA_CATEGORIES",
     "CROSS_CATEGORIES",
     "EPHEMERAL_CATEGORIES",
-    *_LAZY,
+    "IntentExtractor",
+    "GraphStore",
+    "LLMClient",
+    "extract_json",
+    "SimilarityCalculator",
+    "RhythmEngine",
+    "PersonaExtractor",
+    "PersonaFormatter",
+    "PersonaManager",
+    "VectorStore",
 ]
 
 

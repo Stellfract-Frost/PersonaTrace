@@ -3,7 +3,6 @@
 跑法：D:/Anaconda3/python.exe -m pytest test_memory_v2.py -q
 """
 
-import math
 import time
 
 import pytest
@@ -129,12 +128,12 @@ def test_typed_time_roundtrip_and_preserve(mem):
 
 
 def test_api_router():
-    fastapi = pytest.importorskip("fastapi")
-    httpx = pytest.importorskip("httpx")
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from api_v2 import build_router
+    from personatrace.api_v2 import build_router
 
     m = MemoryV2(backend=MemoryBackend(), user_id="api_user")
     app = FastAPI()
