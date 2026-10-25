@@ -48,7 +48,7 @@ except ImportError:  # 直接以脚本方式运行：python personatrace/mcp_ser
 
 PROTOCOL_VERSION = "2024-11-05"
 SUPPORTED_PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION})
-SERVER_INFO = {"name": "personatrace-memory", "version": "1.6.5"}
+SERVER_INFO = {"name": "personatrace-memory", "version": "2.0.0"}
 DEFAULT_TIMEOUT = 8.0
 
 _mem: Optional[MemoryV2] = None

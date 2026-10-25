@@ -199,8 +199,6 @@ benchmark. The earlier 12/10 fixture scored 90.0%; it was too easy.
 method                      recall@3     MRR
 v2 native (query, no pinned)    66.0%   0.707
 v2 native (pinned)               2.0%   0.020
-v1 string                       61.0%   0.657
-v1 + bge                        73.0%   0.737
 outer lex                       61.0%   0.637
 outer + bge                     74.0%   0.770
 outer + bge + time facet        76.0%   0.760
@@ -260,9 +258,8 @@ The routine/vector research note is
 | episodes + retrospective search | shipped (1.6.5) |
 | weekly routines + in-turn probes | shipped (1.6.5) |
 | v1 → v2 migration script | shipped; dry-run by default |
+| runtime v1 pipeline | removed in 2.0; migration shim only |
 | CI: tests on Windows/Linux + recall gate | shipped |
-| graph memory | experimental, not wired into default retrieval |
-| `PersonaManager` default path switched to merged | not yet (M3) |
 
 Known limits:
 
@@ -274,8 +271,8 @@ Known limits:
 - episode retrieval falls back to lexical/time when Chroma is unavailable; Chroma requires an embedding function
 - routine probes are hints; the host must ask and must report feedback;
 - there is no background scheduler and no automatic proactive message;
-- `PersonaManager` remains the legacy v1 pipeline; use `MergedMemory` or MCP
-  for the merged path.
+- old Chroma profiles must be migrated with `scripts/migrate_v1.py`; the
+  runtime v1 pipeline is no longer shipped.
 
 ## License
 

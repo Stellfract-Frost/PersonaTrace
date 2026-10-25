@@ -22,28 +22,19 @@ Storage split:
 - ``RoutineStore``: weekly schedules and in-turn probe state.
 - ``ChromaEpisodeIndex``: optional semantic episode index.
 
-Legacy v1 pieces (``PersonaManager``, ``VectorStore``, ``extractor``,
-``formatter``) remain only for migration and the existing Chroma label index.
-They are not the primary write/read path.
+The runtime v1 pipeline (``PersonaManager`` / extractor / formatter / rhythm)
+has been removed. ``VectorStore`` and ``PersonaConfig`` remain only for the
+one-time ``scripts/migrate_v1.py`` migration from old Chroma profiles.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-__version__ = "1.6.5"
+__version__ = "2.0.0"
 
 # 轻量、无外部依赖的成员（导入本包时不触发 chromadb / requests）
 from .config import PersonaConfig
-from .models import (
-    CROSS_CATEGORIES,
-    EPHEMERAL_CATEGORIES,
-    PERSONA_CATEGORIES,
-    WORK_CATEGORIES,
-    GraphEdge,
-    PersonaItem,
-    ProfileData,
-)
 
 _LAZY = {
     "MemoryV2": ".memory_v2",
@@ -59,17 +50,11 @@ _LAZY = {
     "RoutineStore": ".routines",
     "Routine": ".routines",
     "IntentStore": ".intentions",
-    "IntentExtractor": ".intent_extractor",
-    "GraphStore": ".graph_memory",
     "parse_due": ".schema",
     "rank": ".recall",
     "LLMClient": ".llm_client",
     "extract_json": ".llm_client",
-    "SimilarityCalculator": ".similarity",
-    "RhythmEngine": ".rhythm",
-    "PersonaExtractor": ".extractor",
-    "PersonaFormatter": ".formatter",
-    "PersonaManager": ".persona_manager",
+    # Migration-only surface.
     "VectorStore": ".vector_store",
 }
 
@@ -88,24 +73,11 @@ __all__ = [
     "Belief",
     "parse_due",
     "rank",
-    # v1 migration/compatibility surface
+    # LLM/config helpers, still used by the evaluation scripts.
     "PersonaConfig",
-    "PersonaItem",
-    "ProfileData",
-    "GraphEdge",
-    "WORK_CATEGORIES",
-    "PERSONA_CATEGORIES",
-    "CROSS_CATEGORIES",
-    "EPHEMERAL_CATEGORIES",
-    "IntentExtractor",
-    "GraphStore",
     "LLMClient",
     "extract_json",
-    "SimilarityCalculator",
-    "RhythmEngine",
-    "PersonaExtractor",
-    "PersonaFormatter",
-    "PersonaManager",
+    # Migration-only surface.
     "VectorStore",
 ]
 

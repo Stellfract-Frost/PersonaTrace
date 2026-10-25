@@ -173,8 +173,6 @@ memory_routine_label`。
 method                      recall@3     MRR
 v2 native (query, no pinned)    66.0%   0.707
 v2 native (pinned)               2.0%   0.020
-v1 string                       61.0%   0.657
-v1 + bge                        73.0%   0.737
 outer lex                       61.0%   0.637
 outer + bge                     74.0%   0.770
 outer + bge + time facet        76.0%   0.760
@@ -230,9 +228,8 @@ episode hook 在 133 题中命中 132 题（20 题 smoke 为 20/20）；合并�
 | episode + 回溯检索 | 已发布（1.6.5） |
 | weekly routine + in-turn probe | 已发布（1.6.5） |
 | v1 → v2 迁移脚本 | 有；默认 dry-run |
+| 运行时 v1 | 2.0 已移除；只保留迁移 shim |
 | CI：Windows/Linux 测试 + recall 闸门 | 已发布 |
-| graph memory | 实验性，未接默认检索 |
-| `PersonaManager` 默认切到合并路径 | 未做（M3） |
 
 去重是词面且保守的；低重叠的复述仍可能产生第二条记录。50 条查询也仍然是小样本。
 Routine 目前是 weekly 字段，不是完整 RFC 5545 RRULE parser；probe 只是 hint，

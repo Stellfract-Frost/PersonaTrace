@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "personatrace"
-version = "1.6.5"
+version = "2.0.0"
 description = "A memory layer for what is still true, what is due, and why it was stored."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -53,14 +53,6 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F"]
 ignore = ["E501"]
-
-# Legacy v1 modules predate the lint gate and use one-line statements. They
-# are quarantined rather than reformatted in this change; new code is clean.
-[tool.ruff.lint.per-file-ignores]
-"personatrace/persona_manager.py" = ["E701", "E702", "E722", "E741"]
-"personatrace/extractor.py" = ["E701", "E702", "E722", "E741"]
-"personatrace/formatter.py" = ["E701", "E702", "E722", "E741"]
-"personatrace/file_loader.py" = ["E701", "E702", "E722", "E741"]
 
 [tool.pytest.ini_options]
 testpaths = ["."]

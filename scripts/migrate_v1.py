@@ -1,8 +1,8 @@
 """One-time v1 (Chroma profile) -> v2 (SQLite/Redis beliefs) migration.
 
 Dry-run by default. It reads Chroma raw through VectorStore.load_all(), not
-PersonaManager.load(), because load() applies the old _decay_all and would
-double-decay confidence before the migration.
+the old manager-level load path, because that path applied _decay_all and
+would double-decay confidence before the migration.
 
 Usage:
     python scripts/migrate_v1.py --db ./persona_data/memory.db
@@ -28,14 +28,11 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from personatrace.config import PersonaConfig  # noqa: E402
-from personatrace.memory_v2 import CATEGORY_STABILITY, MemoryV2, SQLiteBackend  # noqa: E402
+from personatrace.memory_v2 import MemoryV2, SQLiteBackend  # noqa: E402
 from personatrace.schema import (  # noqa: E402
-    ALL_CATEGORIES, DEFAULT_TZ, STABILITY_DAYS, coerce_in, due_for_write,
-    track_for,
+    ALL_CATEGORIES, DEFAULT_TZ, coerce_in, due_for_write, track_for,
 )
 from personatrace.vector_store import VectorStore  # noqa: E402
-
-CATEGORY_STABILITY.update(STABILITY_DAYS)
 
 TZ = DEFAULT_TZ
 TARGETS = set(ALL_CATEGORIES)

@@ -15,7 +15,19 @@ try:
 except ImportError:
     CHROMA_AVAILABLE = False
 from .config import PersonaConfig
-from .models import WORK_CATEGORIES, PERSONA_CATEGORIES, CROSS_CATEGORIES, EPHEMERAL_CATEGORIES
+
+# v1 taxonomy, kept only so the one-time Chroma migration can read old rows.
+WORK_CATEGORIES = [
+    "likes", "dislikes", "constraints", "explicit_facts",
+    "expertise", "projects", "goals",
+]
+PERSONA_CATEGORIES = [
+    "identity", "traits", "interests", "style_notes", "behavior_patterns",
+    "decision_style", "interpersonal", "boundaries", "corrections", "rhythms",
+]
+CROSS_CATEGORIES = ["cross_insights", "analysis_log"]
+EPHEMERAL_CATEGORIES = ["observation_log", "uncertain", "low_confidence", "timeline"]
+
 logger = logging.getLogger(__name__)
 CHROMA_COLLECTION = "persona_items"
 class VectorStore:

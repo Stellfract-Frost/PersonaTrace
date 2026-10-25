@@ -142,17 +142,6 @@ def v2_native(rows, query, *, pinned: bool):
     return labels(result["shown"])
 
 
-def v1_string(rows, query, embed_fn=None):
-    from personatrace.config import PersonaConfig
-    from personatrace.similarity import SimilarityCalculator
-    sim = SimilarityCalculator(PersonaConfig())
-    if embed_fn is not None:
-        sim.set_embed_fn(embed_fn)
-    scored = [(sim.compute(query, row["label"]), row) for row in rows]
-    scored.sort(key=lambda item: (-item[0], item[1]["label"]))
-    return labels(row for _, row in scored[:3])
-
-
 def outer_rank(rows, query, *, embed_fn=None, facet=False):
     query_vec = None
     vectors = None
@@ -229,8 +218,6 @@ def main() -> int:
     methods = [
         ("v2 native (no pinned)", lambda r, q, e: v2_native(r, q, pinned=False)),
         ("v2 native (pinned)", lambda r, q, e: v2_native(r, q, pinned=True)),
-        ("v1 string", lambda r, q, e: v1_string(r, q, None)),
-        ("v1 + bge", lambda r, q, e: v1_string(r, q, e)),
         ("outer lex", lambda r, q, e: outer_rank(r, q, embed_fn=None)),
         ("outer + bge", lambda r, q, e: outer_rank(r, q, embed_fn=e)),
         ("outer + bge + facet", lambda r, q, e: outer_rank(r, q, embed_fn=e, facet=True)),

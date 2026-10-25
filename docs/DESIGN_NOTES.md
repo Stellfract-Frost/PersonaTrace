@@ -39,8 +39,6 @@ Local run with `BAAI/bge-small-zh-v1.5`:
 |---|---|---|
 | v2 native (query), no pinned | 66.0% | 0.707 |
 | v2 native, pinned (k=3 stress) | 2.0% | 0.020 |
-| v1 string only | 61.0% | 0.657 |
-| v1 + bge | 73.0% | 0.737 |
 | outer lexical | 61.0% | 0.637 |
 | outer + bge | 74.0% | 0.770 |
 | **outer + bge + time facet** | **76.0%** | **0.760** |
@@ -200,8 +198,9 @@ It is a hint, not a message. `skipped_today` is not `denied`; silence is
    the write path refuses them.
 10. **Do not run v1 `_decay_all` and v2 retention together.** Two clocks produce
     two confidences and an unexplainable rank.
-11. **Read raw Chroma rows for migration.** `PersonaManager.load()` applies the
-    old decay before migration; that would decay twice.
+11. **Read raw Chroma rows for migration.** A manager-level load applied the
+    old decay before migration; that would decay twice. The runtime v1
+    pipeline is gone, so the migration script reads Chroma directly.
 12. **Label idempotency is not semantic dedup.** `uuid5(user:...:label)`
     deduplicates repeated labels; the merged write path adds a conservative
     lexical check. It is not an alias table, so a low-overlap paraphrase can
