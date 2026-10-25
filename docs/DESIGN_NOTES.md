@@ -38,7 +38,7 @@ Local run with `BAAI/bge-small-zh-v1.5`:
 | Method | recall@3 | MRR |
 |---|---|---|
 | v2 native (query), no pinned | 66.0% | 0.707 |
-| v2 native, pinned (k=3 stress) | 2.0% | 0.020 |
+| v2 native, pinned (capped) | 52.0% | 0.290 |
 | outer lexical | 61.0% | 0.637 |
 | outer + bge | 74.0% | 0.770 |
 | **outer + bge + time facet** | **76.0%** | **0.760** |
@@ -100,7 +100,7 @@ score = (0.15 + 0.85 * sim) * (0.35 + 0.65 * retention)
   (neutral), not 0;
 - vector uses candidate-set z-score + tanh, so 0.5 means "average", not
   "irrelevant";
-- pinned categories are always kept;
+- pinned categories are kept up to half the budget (`max(1, k // 2)`);
 - cross-category items come from the unselected tail, not ranks 16–18.
 
 ### 3.4 Time facet is a conditional bypass
@@ -186,8 +186,9 @@ It is a hint, not a message. `skipped_today` is not `denied`; silence is
    is the wrong clock.
 4. **Do not merge tasks by label.** "这周三上课" and "下周三上课" are two
    records.
-5. **Pinned can eat the budget.** With three pinned items and `k=4`, only one
-   related slot remains. The time facet is a separate section for this reason.
+5. **Pinned must not eat the budget.** With many pinned rows and `k=3`, the
+   query gets no slot and recall becomes a constant. Cap pinned at half the
+   budget; the time facet remains a separate section for the same reason.
 6. **RRF over a degenerate lexical channel is worse than no fusion.** A channel
    that returns the same ranking for every query adds noise.
 7. **Vector z-score is a scale fix, not a quality fix.** It makes cosine scores

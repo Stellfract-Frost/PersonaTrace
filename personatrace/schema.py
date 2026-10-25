@@ -493,7 +493,7 @@ def parse_due(text: str, now: Optional[datetime] = None, tz: str = DEFAULT_TZ) -
     # Recurring habits are a typed category of their own, not deadlines.
     # Returning the type makes `recurring` reachable in the public contract;
     # due_for_write and IntentStore still refuse to turn it into a deadline.
-    if re.search(r"每(?:天|日|周|星期|礼拜|月)", raw):
+    if re.search(r"每(?:天|日|周|星期|礼拜|月|年)", raw):
         return TypedTime(kind="recurring", raw=raw, confidence=0.8)
     if re.search(
         r"\b(?:every|each)\s+(?:day|week|month|year|morning|night|monday|tuesday|"
@@ -505,6 +505,22 @@ def parse_due(text: str, now: Optional[datetime] = None, tz: str = DEFAULT_TZ) -
     iso_due = _parse_iso_due(raw, now, tz)
     if iso_due is not None:
         return iso_due
+
+    # Explicit Chinese year: "2029年3月1日". The month/day parser below
+    # deliberately rolls a past date into the future, which must never be
+    # allowed to discard an explicitly written year.
+    year_match = re.search(
+        r"(?<!\d)(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)?",
+        raw,
+    )
+    if year_match:
+        try:
+            day = date(int(year_match.group(1)), int(year_match.group(2)),
+                       int(year_match.group(3)))
+        except ValueError:
+            return None
+        clock = _parse_clock(raw, day, tz)
+        return _typed(day, clock, now, raw, tz)
 
     english = _parse_english_due(raw, now, tz)
     if english is not None:

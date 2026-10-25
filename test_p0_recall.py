@@ -21,12 +21,12 @@ def test_pinned_always_kept_and_budget_accounted():
     assert result["hidden_count"] >= 0
 
 
-def test_pinned_eats_budget_does_not_crash():
+def test_pinned_is_capped_and_leaves_room_for_query():
     result = rank(ROWS, "住哪儿", k=2)
-    assert len(result["pinned"]) == 2
-    assert result["shown"] == []
-    # tail = 5; cross takes at most 2; hidden = tail - cross.
-    assert result["hidden_count"] == 3
+    assert len(result["pinned"]) == 1      # max(1, k // 2)
+    assert len(result["shown"]) == 1       # one related slot remains
+    # tail = 4; cross takes at most 2; hidden = tail - cross.
+    assert result["hidden_count"] == 2
 
 
 def test_vector_channel_puts_deadline_on_top():

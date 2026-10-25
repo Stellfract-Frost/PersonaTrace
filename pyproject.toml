@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "personatrace"
-version = "2.0.1"
+version = "2.0.2"
 description = "A memory layer for what is still true, what is due, and why it was stored."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,7 +20,12 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 # The belief kernel uses the standard library; the merged facade uses Pydantic.
-dependencies = ["pydantic>=2.0"]
+# tzdata makes ZoneInfo work on Windows; dateutil drives weekly recurrence.
+dependencies = [
+  "pydantic>=2.0",
+  "python-dateutil>=2.8",
+  "tzdata>=2024.1; platform_system == 'Windows'",
+]
 
 [project.optional-dependencies]
 llm = ["requests>=2.28.0"]

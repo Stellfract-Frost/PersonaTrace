@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -52,7 +53,11 @@ def _zone(tz: str):
 
 
 def _aware(now: Optional[datetime], tz: str) -> datetime:
-    now = now or datetime.now(_zone(tz))
+    # Use the same wall-clock primitive as MemoryV2.observe (time.time()).
+    # datetime.now() and time.time() can differ by a few milliseconds on
+    # Windows/Python 3.10; a write at time.time() then a context snapshot at
+    # datetime.now() could be a few ms older and hide the just-written belief.
+    now = now or datetime.fromtimestamp(time.time(), _zone(tz))
     if now.tzinfo is None:
         return now.replace(tzinfo=_zone(tz))
     return now.astimezone(_zone(tz))

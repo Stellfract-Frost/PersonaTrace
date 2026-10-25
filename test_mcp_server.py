@@ -255,14 +255,16 @@ def test_worker_timeout_is_real_and_restartable(monkeypatch):
     db = _workspace_db("_test_mcp_timeout.db")
     monkeypatch.setenv("PERSONA_DB", db)
     monkeypatch.setenv("PERSONA_USER_ID", "timeout_user")
-    runner = mcp_server._ProcessRunner(timeout=1.0)
+    # 3s, not 1s: the fresh worker's first memory_state import can be slow on
+    # a cold CI runner, and the test should measure the timeout, not imports.
+    runner = mcp_server._ProcessRunner(timeout=3.0)
     try:
         started = time.monotonic()
-        result = runner.call("__sleep__", {"seconds": 5})
+        result = runner.call("__sleep__", {"seconds": 8})
         elapsed = time.monotonic() - started
         assert result["isError"] is True
         assert "memory_timeout" in result["content"][0]["text"]
-        assert elapsed < 3.0, "timeout must terminate the worker, not wait for sleep"
+        assert elapsed < 6.0, "timeout must terminate the worker, not wait for sleep"
 
         again = runner.call("memory_state", {})
         assert again["isError"] is False

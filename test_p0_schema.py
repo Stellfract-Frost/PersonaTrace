@@ -125,6 +125,22 @@ def test_iso_date_is_a_language_neutral_due():
     assert parse_due("2026-10-20", NOW, TZ).kind == "past"
 
 
+def test_explicit_chinese_year_is_not_dropped():
+    for year in (2027, 2029, 2031):
+        item = parse_due(f"{year}年3月1日", NOW, TZ)
+        assert item is not None
+        assert datetime.fromtimestamp(item.at, Z).strftime("%Y-%m-%d") == f"{year}-03-01"
+
+    timed = parse_due("2028年1月5日 下午3点", NOW, TZ)
+    assert timed is not None
+    assert datetime.fromtimestamp(timed.at, Z).strftime("%Y-%m-%d %H:%M") == "2028-01-05 15:00"
+
+
+def test_yearly_is_recurring_not_a_one_off_deadline():
+    item = parse_due("每年12月25日", NOW, TZ)
+    assert item is not None and item.kind == "recurring"
+
+
 def test_recurring_is_typed_but_not_a_deadline():
     daily = parse_due("每天十点睡", NOW, TZ)
     weekly = parse_due("每周三上课", NOW, TZ)

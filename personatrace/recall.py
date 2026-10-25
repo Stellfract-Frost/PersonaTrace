@@ -150,6 +150,10 @@ def rank(
     rest = [row for row in rows if row.get("category") not in pinned_categories]
 
     pinned.sort(key=lambda row: (-_confidence(row), -_retention(row), _id(row)))
+    # Pinned is mandatory but bounded: leave at least half the top-k for the
+    # actual query. Otherwise a profile with many constraints pins everything.
+    pinned_budget = max(1, int(k) // 2) if int(k) > 0 else 0
+    pinned = pinned[:pinned_budget]
 
     cosines: Dict[str, float] = {}
     if query_vec is not None and vectors:

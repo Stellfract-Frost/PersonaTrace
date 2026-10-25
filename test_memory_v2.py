@@ -472,6 +472,18 @@ def test_boundaries_are_pinned_by_default(mem):
     assert [row["category"] for row in result["pinned"]] == ["boundaries"]
 
 
+def test_pinned_budget_does_not_consume_the_query_budget(mem):
+    now = time.time()
+    for index in range(6):
+        mem.observe("boundaries", f"边界规则{index}", track="persona", ts=now)
+    for index in range(6):
+        mem.observe("likes", f"喜欢主题{index}", track="work", ts=now)
+    result = mem.recall(as_of=now, k=4, query="主题3")
+    assert len(result["pinned"]) == 2          # max(1, k // 2)
+    assert len(result["shown"]) <= 4
+    assert any(row["category"] == "likes" for row in result["shown"])
+
+
 def test_recall_has_a_query_channel(mem):
     now = time.time()
     mem.observe("likes", "喜欢深色主题", track="work", ts=now - 60 * DAY)

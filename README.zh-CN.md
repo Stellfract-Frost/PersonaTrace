@@ -172,14 +172,14 @@ memory_routine_label`。
 ```text
 method                      recall@3     MRR
 v2 native (query, no pinned)    66.0%   0.707
-v2 native (pinned)               2.0%   0.020
+v2 native (pinned)              52.0%   0.290
 outer lex                       61.0%   0.637
 outer + bge                     74.0%   0.770
 outer + bge + time facet        76.0%   0.760
 ```
 
-`v2 native (query)` 是内核自己的字面检索，不套外层；`pinned` 是压力样例：
-`k=3` 时有四十条 pinned，预算全被 pinned 吃掉，所以仍是 2.0%。
+`v2 native (query)` 是内核自己的字面检索，不套外层；`pinned` 最多占一半预算
+（`max(1, k // 2)`），不会再把 k 全部吃掉。
 `outer + bge` → `+ time facet`：recall +2.0，MRR -0.010。时间桶可能把一条正确的
 due 记录排到同样正确的语义记录前面；引用大 fixture 的数字。CI 用确定性的
 `outer lex` 通道卡 60%。

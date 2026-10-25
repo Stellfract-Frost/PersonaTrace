@@ -548,6 +548,10 @@ DEFAULT_PINNED_CATEGORIES = ("boundaries", "constraints", "identity")
 MAX_BELIEF_VERSIONS = 200       # per-belief transaction-time history budget
 CAS_RETRIES = 8                 # optimistic replay attempts on a version conflict
 _UNSET = object()               # distinguish "not supplied" from "explicitly clear"
+# datetime.timestamp() rounds to microseconds; a write can land a fraction of
+# a microsecond after a same-process read on Windows/Python 3.10. Treat this
+# as clock granularity, not as future knowledge.
+RECORDED_AT_EPSILON = 0.001
 
 
 def stability_from_half_life(half_life_days: float) -> float:
@@ -1147,21 +1151,24 @@ class MemoryV2:
         that date", which is the old valid-time-only behaviour.
         """
         as_of = as_of if as_of is not None else time.time()
-        known = known_as_of if known_as_of is not None else as_of
-        rows = self.b.zrangebyscore(self._tl, 0, as_of)
+        # Read at a tiny tolerance: datetime.timestamp() rounds to microseconds,
+        # so a write can appear a fraction of a microsecond after its own read.
+        read_as_of = as_of + RECORDED_AT_EPSILON
+        known = (known_as_of if known_as_of is not None else as_of) + RECORDED_AT_EPSILON
+        rows = self.b.zrangebyscore(self._tl, 0, read_as_of)
         out: List[Dict[str, Any]] = []
         for bid, _score in rows:
             if known_as_of is not None:
-                belief = self._valid_belief_at(bid, known, as_of)
+                belief = self._valid_belief_at(bid, known, read_as_of)
                 if belief is None:
                     belief = self._belief_at(bid, known)
             else:
                 belief = self._belief_at(bid, known)
             if belief is None:
                 continue
-            if belief.valid_from_ts > as_of:
+            if belief.valid_from_ts > read_as_of:
                 continue
-            if belief.invalid_at_ts and belief.invalid_at_ts <= as_of and not include_invalidated:
+            if belief.invalid_at_ts and belief.invalid_at_ts <= read_as_of and not include_invalidated:
                 continue          # 那个时刻它已经失效（审计时可用 include_invalidated 打开）
             r = retention(belief.stability, (as_of - belief.last_support_ts) / 86400.0)
             if not include_archived and r < ARCHIVE_AT:
@@ -1194,6 +1201,16 @@ class MemoryV2:
         pool = self.state(as_of=as_of, expand=expand, known_as_of=known_as_of)
         pinned = [x for x in pool if x["category"] in pinned_categories]
         rest = [x for x in pool if x["category"] not in pinned_categories]
+        pinned.sort(key=lambda row: (
+            -float(row.get("effective_confidence", 0.0)),
+            -float(row.get("retention", 0.0)),
+            str(row.get("id", "")),
+        ))
+        # Pinned categories are mandatory, not budget-exempt. Half the budget
+        # is enough; forty constraints must not consume k=3 and make recall a
+        # constant independent of the query.
+        pinned_budget = max(1, int(k) // 2) if int(k) > 0 else 0
+        pinned = pinned[:pinned_budget]
 
         qv = list(query_vec) if query_vec is not None else None
         qtext = (query or "").strip().lower()

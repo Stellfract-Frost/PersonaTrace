@@ -198,15 +198,15 @@ benchmark. The earlier 12/10 fixture scored 90.0%; it was too easy.
 ```text
 method                      recall@3     MRR
 v2 native (query, no pinned)    66.0%   0.707
-v2 native (pinned)               2.0%   0.020
+v2 native (pinned)              52.0%   0.290
 outer lex                       61.0%   0.637
 outer + bge                     74.0%   0.770
 outer + bge + time facet        76.0%   0.760
 ```
 
 `v2 native (query)` is the kernel's own lexical channel with no outer layer.
-`pinned` is a stress case: with `k=3` and forty pinned rows, the budget is all
-pinned, which is why that row stays at 2.0%. The useful comparison is
+`pinned` is capped at half the budget (`max(1, k // 2)`), so constraints and
+boundaries cannot consume the whole query budget. The useful comparison is
 `outer + bge` → `+ time facet`: +2.0 recall but -0.010 MRR. The time bucket can
 promote a due item above an equally correct semantic item. The larger fixture is
 the number to quote; CI gates the deterministic `outer lex` channel at 60%.
@@ -243,6 +243,9 @@ The temporal kernel is described in
 [MEMORY_V2.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/MEMORY_V2.md).
 The routine/vector research note is
 [ROUTINE_MEMORY_RESEARCH.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/ROUTINE_MEMORY_RESEARCH.md).
+Release history is in [CHANGELOG.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/CHANGELOG.md);
+the v1 → 2.x import/behavior changes are in
+[UPGRADING.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/UPGRADING.md).
 
 ## What is shipped
 
