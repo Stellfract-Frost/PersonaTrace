@@ -16,6 +16,7 @@ ROWS = [
 def test_pinned_always_kept_and_budget_accounted():
     result = rank(ROWS, "我那个 deadline 是几号", k=4)
     assert [r["id"] for r in result["pinned"]] == ["pin1", "pin2"]
+    assert result["pinned_count"] == 2
     assert len(result["shown"]) == 2  # k - pinned
     assert result["hidden_count"] >= 0
 

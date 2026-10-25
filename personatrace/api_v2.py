@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -83,14 +84,19 @@ def build_router(mem: MemoryV2) -> APIRouter:
 
     @router.post("/observe", response_model=Dict[str, Any], summary="写入一次观察（证据 + 结论）")
     async def observe(payload: ObserveIn) -> Dict[str, Any]:
+        # Match the kernel/MCP contract: omitted typed-time fields preserve
+        # the old value; explicitly supplied null/"none"/"" clears it.
+        typed: Dict[str, Any] = {}
+        for name in ("due_at_ts", "time_kind", "time_raw"):
+            if name in payload.model_fields_set:
+                typed[name] = getattr(payload, name)
         belief = await asyncio.to_thread(
             mem.observe,
             payload.category, payload.label,
             track=payload.track, confidence=payload.confidence,
             evidence_id=payload.evidence_id, dimension=payload.dimension,
             reasoning=payload.reasoning, evidence_text=payload.evidence_text,
-            due_at_ts=payload.due_at_ts, time_kind=payload.time_kind,
-            time_raw=payload.time_raw, ts=payload.ts,
+            ts=payload.ts, **typed,
         )
         return {
             "id": belief.id,
@@ -103,23 +109,32 @@ def build_router(mem: MemoryV2) -> APIRouter:
     @router.get("/state", response_model=StateOut, summary="某一时刻的完整状态（支持时间回溯）")
     async def state(
         as_of: Optional[float] = Query(None, description="UNIX 秒；不传=现在"),
+        known_as_of: Optional[float] = Query(
+            None,
+            description="事务时间；不传=与 as_of 相同（真快照）。传当前时间=用今天的知识回看",
+        ),
         include_archived: bool = Query(False),
     ) -> StateOut:
-        rows = await asyncio.to_thread(mem.state, as_of, include_archived)
+        rows = await asyncio.to_thread(
+            mem.state, as_of, include_archived, False, 0, known_as_of,
+        )
         return StateOut(
-            as_of=as_of or 0.0, backend=mem.mode, count=len(rows),
-            beliefs=[BeliefOut(**r) for r in rows],
+            as_of=as_of if as_of is not None else time.time(), backend=mem.mode,
+            count=len(rows), beliefs=[BeliefOut(**r) for r in rows],
         )
 
     @router.get("/recall", response_model=RecallOut, summary="取用：相关度 × 保持率，必选项强制入选")
     async def recall(
-        q: str = Query(..., description="查询文本（此处按标签文本检索，向量由调用方注入）"),
+        q: str = Query(..., description="查询文本；内核自己做字面 IDF，向量可由调用方注入"),
         as_of: Optional[float] = None,
+        known_as_of: Optional[float] = None,
         k: int = Query(15, ge=1, le=100),
         expand: int = Query(0, ge=0, le=5, description="回表深度：0=只给标签，>0=附带 reasoning 与原文片段"),
     ) -> RecallOut:
-        # 说明：向量化在 SDK 侧完成（宿主已有 embedding），API 负责时间与优先级策略
-        result = await asyncio.to_thread(mem.recall, None, None, as_of, k, ("constraints", "identity"), expand)
+        result = await asyncio.to_thread(
+            mem.recall, None, None, as_of, k, ("constraints", "identity"), expand,
+            query=q, known_as_of=known_as_of,
+        )
         return RecallOut(
             as_of=result["as_of"], backend=result["backend"],
             pinned_count=result["pinned_count"], hidden_count=result["hidden_count"],
@@ -128,7 +143,9 @@ def build_router(mem: MemoryV2) -> APIRouter:
 
     @router.post("/beliefs/{belief_id}/invalidate", summary="失效（不删除，保留历史）")
     async def invalidate(belief_id: str, ts: Optional[float] = None) -> Dict[str, Any]:
-        await asyncio.to_thread(mem.invalidate, belief_id, ts)
+        ok = await asyncio.to_thread(mem.invalidate, belief_id, ts)
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"belief not found: {belief_id}")
         return {"status": "ok", "belief_id": belief_id}
 
     @router.post("/behavior", summary="记录一次行为（用于预测下一步）")

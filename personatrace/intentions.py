@@ -23,6 +23,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import wraps
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -175,6 +176,15 @@ class Intent:
         )
 
 
+def _locked(method):
+    """Serialize read-modify-write methods on the store's RLock."""
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class IntentStore:
     """SQLite-backed intention ledger.
 
@@ -263,6 +273,7 @@ class IntentStore:
             self.conn.commit()
 
     # ---------------------------------------------------------------- writes
+    @_locked
     def upsert(
         self,
         user_id: str,
@@ -368,6 +379,7 @@ class IntentStore:
         self.conn.commit()
         return self.get(iid)  # type: ignore[return-value]
 
+    @_locked
     def reschedule(self, intent_id: str, due_at: Any, *, now: Any = None) -> Optional[Intent]:
         row = self._row(intent_id)
         if row is None:
@@ -391,6 +403,7 @@ class IntentStore:
         self.conn.commit()
         return self.get(intent_id)
 
+    @_locked
     def complete(self, intent_id: str, occurrence_ts: Any = None, *, now: Any = None) -> Optional[Intent]:
         row = self._row(intent_id)
         if row is None:
@@ -418,6 +431,7 @@ class IntentStore:
         self.conn.commit()
         return self.get(intent_id)
 
+    @_locked
     def confirm(self, intent_id: str, *, now: Any = None) -> Optional[Intent]:
         row = self._row(intent_id)
         if row is None:
@@ -432,6 +446,7 @@ class IntentStore:
         self.conn.commit()
         return self.get(intent_id)
 
+    @_locked
     def cancel(self, intent_id: str, *, now: Any = None) -> Optional[Intent]:
         row = self._row(intent_id)
         if row is None:
@@ -447,6 +462,7 @@ class IntentStore:
         self.conn.commit()
         return self.get(intent_id)
 
+    @_locked
     def add_exdate(self, intent_id: str, occurrence_ts: Any, *, now: Any = None) -> Optional[Intent]:
         row = self._row(intent_id)
         if row is None:
@@ -471,6 +487,7 @@ class IntentStore:
         self.conn.commit()
         return self.get(intent_id)
 
+    @_locked
     def apply_update(self, user_id: str, update: Dict[str, Any], *, now: Any = None) -> Optional[Intent]:
         kind = update.get("kind")
         hint = str(update.get("title_hint") or "")

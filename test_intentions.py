@@ -3,6 +3,7 @@
 No LLM, no network, no Chroma. The clock is always passed in.
 """
 
+import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -120,3 +121,23 @@ def test_touch_turn_roundtrip():
     store = IntentStore(":memory:", default_tz=TZ)
     store.touch_turn("u", dt(22, 23, 7))
     assert store.last_turn_at("u") == dt(22, 23, 7).timestamp()
+
+
+def test_concurrent_upserts_are_serialized():
+    store = IntentStore(":memory:", default_tz=TZ)
+    errors = []
+
+    def worker():
+        try:
+            store.upsert("u", "并发任务", due_at=dt(24), granularity="day", now=dt(22, 23, 7))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors, errors
+    assert len(store.list("u")) == 1

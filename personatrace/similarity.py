@@ -3,10 +3,17 @@ Similarity computation and dedup module.
 Provides embedding-based semantic similarity,
 with cross-category dedup functionality.
 """
+from __future__ import annotations
+
 import logging
 import threading
 from typing import List, Dict, Any, Optional
-import numpy as np
+
+try:  # numpy is only needed for the optional embedding path
+    import numpy as np
+except ImportError:  # pragma: no cover - exercised in minimal installs
+    np = None  # type: ignore[assignment]
+
 from .config import PersonaConfig
 logger = logging.getLogger(__name__)
 class SimilarityCalculator:
@@ -24,7 +31,7 @@ class SimilarityCalculator:
         self.config = config
         self.embed_fn = None
         self._cache: Dict[tuple, float] = {}
-        self._embed_cache: Dict[str, np.ndarray] = {}
+        self._embed_cache: Dict[str, Any] = {}
         self._lock = threading.Lock()
     def set_embed_fn(self, embed_fn):
         """Set the embedding function."""
@@ -77,7 +84,7 @@ class SimilarityCalculator:
         return sim
     def _embed_similarity(self, a: str, b: str) -> Optional[float]:
         """Compute cosine similarity via embedding vectors."""
-        if self.embed_fn is None:
+        if self.embed_fn is None or np is None:
             return None
         try:
             va = self._get_embedding(a)
@@ -90,11 +97,11 @@ class SimilarityCalculator:
         except Exception as e:
             logger.debug("Embedding similarity computation failed: %s", e)
         return None
-    def _get_embedding(self, text: str) -> Optional[np.ndarray]:
+    def _get_embedding(self, text: str) -> Optional[Any]:
         """Get embedding vector for text (with cache)."""
         if text in self._embed_cache:
             return self._embed_cache[text]
-        if self.embed_fn is None:
+        if self.embed_fn is None or np is None:
             return None
         try:
             vec = self.embed_fn([text])[0]

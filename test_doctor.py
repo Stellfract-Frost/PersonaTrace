@@ -18,3 +18,13 @@ def test_doctor_memory_mode(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "进程内后端" in out
+
+
+def test_doctor_fails_on_unexpected_memory_fallback(tmp_path, monkeypatch, capsys):
+    # A directory cannot be opened as a SQLite database.
+    monkeypatch.setenv("PERSONA_DB", str(tmp_path))
+    rc = doctor.main([])
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "警告" in out
+    assert "SQLite backend unavailable" in out

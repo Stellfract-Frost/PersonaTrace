@@ -42,6 +42,14 @@ def test_probe_window_and_weekly_weekday():
     assert store.probe("u", now=TUESDAY.replace(day=28)) == []  # Wednesday
 
 
+def test_probe_questions_follow_action_language():
+    store = make_store()
+    store.label("u", "上课", time="19:00", weekdays=[2], anchor_date="2026-10-20")
+    probe = store.probe("u", now=TUESDAY)[0]
+    assert any("上课" in question for question in probe["suggested_questions"])
+    assert all(question.startswith(("你", "今天")) for question in probe["suggested_questions"])
+
+
 def test_confirm_defaults_and_second_confirm_trusts():
     store = make_store()
     store.label("u", "attend class", time="19:00", weekdays=[2], anchor_date="2026-10-20")

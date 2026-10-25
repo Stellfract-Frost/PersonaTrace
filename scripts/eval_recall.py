@@ -125,7 +125,8 @@ def labels(rows: Iterable[Dict]) -> List[str]:
 
 
 def v2_native(rows, query, *, pinned: bool):
-    # Use the kernel only as a baseline; the merged path does not call this.
+    # The kernel now has its own lexical query channel; this method is still
+    # the no-outer-layer baseline, not the merged path.
     mem = MemoryV2(backend=MemoryBackend(), user_id="eval-native")
     for row in rows:
         mem.observe(
@@ -134,8 +135,10 @@ def v2_native(rows, query, *, pinned: bool):
             due_at_ts=row.get("due_at_ts"), time_kind=row.get("time_kind", "none"),
             time_raw=row.get("time_raw", ""), ts=NOW.timestamp(),
         )
-    result = mem.recall(as_of=NOW.timestamp(), k=3,
-                        pinned_categories=("constraints", "identity") if pinned else ())
+    result = mem.recall(
+        as_of=NOW.timestamp(), k=3, query=query,
+        pinned_categories=("constraints", "identity") if pinned else (),
+    )
     return labels(result["shown"])
 
 
@@ -207,6 +210,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-embed", action="store_true")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--fail-under", type=float, default=None,
+        help="CI gate: exit 1 when the gate method's recall@3 is below this fraction (0..1)",
+    )
+    parser.add_argument(
+        "--gate-method", default=None,
+        help="method name to gate; default: outer lex without embeddings, else outer + bge + facet",
+    )
     args = parser.parse_args()
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -227,12 +238,32 @@ def main() -> int:
 
     print(f"embedder: {embed_name}; beliefs: {len(rows)}; queries: {len(QUERIES)}")
     print(f"{'method':<26} {'recall@3':>9} {'MRR':>7}")
+    results: Dict[str, Dict[str, float]] = {}
     for name, method in methods:
         result = score_method(rows, embed_fn, method)
+        results[name] = result
         print(f"{name:<26} {result['recall@3'] * 100:8.1f}% {result['mrr']:7.3f}")
         if args.verbose:
             for query, expected, top, reciprocal in result["details"]:
                 print(f"  {query} → {top} (expected {sorted(expected)}, rr={reciprocal:.2f})")
+
+    if args.fail_under is not None:
+        gate = args.gate_method or (
+            "outer lex" if embed_name == "none" else "outer + bge + facet"
+        )
+        if gate not in results:
+            print(f"[gate] unknown gate method: {gate}", file=sys.stderr)
+            return 2
+        value = results[gate]["recall@3"]
+        if value < args.fail_under:
+            print(
+                f"[gate] FAIL {gate}: recall@3 {value * 100:.1f}% < {args.fail_under * 100:.1f}%",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"[gate] PASS {gate}: recall@3 {value * 100:.1f}% >= {args.fail_under * 100:.1f}%"
+        )
     return 0
 
 

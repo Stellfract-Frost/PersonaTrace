@@ -195,6 +195,7 @@ def rank(
     return {
         "query": query,
         "pinned": pinned,
+        "pinned_count": len(pinned),
         "shown": shown,
         "cross": cross,
         "hidden": hidden,

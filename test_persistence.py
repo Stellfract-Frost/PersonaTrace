@@ -109,6 +109,48 @@ def test_concurrent_writes_are_serialized(db):
     assert MemoryV2(backend=backend, user_id="qq:1003").state()[0]["hits"] == 10
 
 
+def test_sqlite_cas_is_atomic(db):
+    _, b = db
+    assert b.cas_hash("belief:u:cas", 0, {"version": 1, "label": "a"}) is True
+    assert b.cas_hash("belief:u:cas", 0, {"version": 2, "label": "stale"}) is False
+    assert b.cas_hash("belief:u:cas", 1, {"version": 2, "label": "b"}) is True
+    assert b.hgetall("belief:u:cas")["label"] == "b"
+
+    b.set("lock:u", "owner")
+    assert b.compare_delete("lock:u", "someone-else") is False
+    assert b.compare_delete("lock:u", "owner") is True
+    assert b.get("lock:u") is None
+
+
+def test_history_survives_sqlite_restart(db):
+    path, backend = db
+    t0 = time.time()
+    m1 = MemoryV2(backend=backend, user_id="u:history")
+    m1.observe("goals", "重建历史", track="work", confidence=0.4, ts=t0)
+    m1.observe("goals", "重建历史", track="work", confidence=0.9, ts=t0 + 5 * 86400)
+    backend.close()
+
+    backend2 = SQLiteBackend(path)
+    m2 = MemoryV2(backend=backend2, user_id="u:history")
+    past = m2.state(as_of=t0)
+    assert len(past) == 1
+    assert past[0]["hits"] == 1
+    assert past[0]["confidence"] == 0.4
+    backend2.close()
+
+
+def test_purge_removes_transaction_history(db):
+    _, backend = db
+    m = MemoryV2(backend=backend, user_id="u:purge")
+    m.observe("goals", "要删掉的历史", track="work", ts=time.time())
+    m.observe("goals", "要删掉的历史", track="work", ts=time.time() + 1)
+    assert m.purge() == 1
+    rows = backend._conn.execute(
+        "SELECT key FROM t_hash WHERE key LIKE 'history:u:purge%'"
+    ).fetchall()
+    assert rows == []
+
+
 def test_backend_selection(tmp_path, monkeypatch):
     db_path = str(tmp_path / "x.db")
     backend, mode = build_backend(db_path=db_path)

@@ -37,8 +37,8 @@ Local run with `BAAI/bge-small-zh-v1.5`:
 
 | Method | recall@3 | MRR |
 |---|---|---|
-| v2 native, no pinned | 2.0% | 0.020 |
-| v2 native, pinned | 2.0% | 0.020 |
+| v2 native (query), no pinned | 66.0% | 0.707 |
+| v2 native, pinned (k=3 stress) | 2.0% | 0.020 |
 | v1 string only | 61.0% | 0.657 |
 | v1 + bge | 73.0% | 0.737 |
 | outer lexical | 61.0% | 0.637 |
@@ -83,10 +83,14 @@ The kernel now carries `time_kind` and `time_raw` alongside `due_at_ts`.
 the model only supplies the surface phrase. Past expressions are refused before
 they can become deadlines.
 
-### 3.3 Outer retrieval
+### 3.3 Two retrieval layers
 
-`MemoryV2.recall()` is still a kernel primitive: it has no query text and uses a
-constant similarity. The merged path does not call it. Instead:
+`MemoryV2.recall()` now takes `query=` and has its own candidate-set IDF lexical
+channel, so the kernel is usable without an outer layer (66.0% recall@3 on the
+200/50 fixture, up from 2.0% when every item received a constant similarity).
+Vector cosine is optional and averaged with lexical when present.
+
+The merged path still uses the outer `recall.rank()` layer for the full policy:
 
 ```text
 sim   = label is a substring of query ? 1.0
@@ -143,7 +147,8 @@ check before writing:
 
 - normalize possessives and common intensifiers;
 - normalize a few synonym pairs (`偏好 → 喜欢`, `在赶 → 在做`);
-- compare labels in the same category with `SequenceMatcher` at `>= 0.86`;
+- compare labels in the same category with `SequenceMatcher` at `>= 0.96`;
+- never merge labels whose numbers/months/quantities differ;
 - never merge two items with different typed time slots.
 
 This catches `喜欢深色主题` / `偏好深色主题` and `名字叫小陌` / `我的名字叫小陌`,
@@ -220,6 +225,36 @@ It is a hint, not a message. `skipped_today` is not `denied`; silence is
 21. **Fifty queries are still small.** The 200/50 fixture is harder than the
     original 12/10 one, but it cannot support a claim like "23 points better"
     without a held-out set.
+22. **`as_of` over the current row is not a snapshot.** Reading `invalid_at` off
+    the latest hash and filtering by it still leaks later reinforcement into
+    earlier results. Store a version (with transaction time) per write.
+23. **A Python thread timeout is not a timeout.** `Future.cancel()` cannot stop
+    a running call; it only makes the caller stop waiting. Use a process for a
+    deadline you can enforce, and never claim the write was cancelled when it
+    was not.
+24. **Falsy optional fields are not "clear this field".** `if due_at_ts:` makes
+    an old deadline immortal. Use a sentinel to distinguish "not supplied"
+    from "explicitly clear".
+25. **A correction is not a tombstone.** A later observation of the same label
+    must be able to reopen the validity window; otherwise writes increase
+    `hits` while remaining invisible. Keep the gap between correction and
+    revival in the version history.
+26. **Evidence keys must be scoped by belief.** An episode id shared by
+    several beliefs is provenance, not a unique row: `evidence:{eid}` lets the
+    last writer overwrite `belief_id` and the raw sentence.
+27. **0.86 is too low for short Chinese labels.** A one-character difference in
+    a ten-character string scores 0.889; require near-identity below ~24
+    characters, and treat numbers/months/quantities as identity-bearing.
+28. **Silent degradation is worse than failure.** If SQLite cannot open, keep
+    the host alive but log, expose the warning, and make `doctor` fail.
+29. **A "recent 500" candidate query is not a search index.** It makes older
+    episodes permanently invisible and drops vector ids outside the window.
+    Build lexical candidates with SQL and fetch vector hits by id.
+30. **A facade default must not split persistence.** If `MergedMemory` leaves
+    intentions/episodes/routines in `:memory:` while beliefs hit SQLite, a
+    restart silently loses three of the four memory types.
+31. **Pinned categories must be one list.** `boundaries` was pinned in the
+    outer ranker but not in `MemoryV2.recall`; the MCP path used the latter.
 
 ## 5. Deliberately not done
 
@@ -229,7 +264,8 @@ It is a hint, not a message. `skipped_today` is not `denied`; silence is
 - no full semantic alias merge; dedup is lexical and conservative;
 - no automatic background messages; probes are in-turn hints only;
 - no full RFC 5545 RRULE parser; weekly fields are normalized internally;
-- no 100+ query benchmark or CI gate;
+- no 100+ query benchmark; the 50-query lexical channel is a CI regression
+  gate, not a held-out benchmark;
 - no Redis requirement; SQLite is enough for a local single user.
 
 ## 6. Reproduce

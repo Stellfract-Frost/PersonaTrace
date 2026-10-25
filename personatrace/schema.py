@@ -143,7 +143,7 @@ class TypedTime:
     kind:
       due       future deadline/event
       past      explicit past event ("上周五去了海边")
-      recurring habit ("每天十点睡") — currently parse_due returns None for it
+      recurring habit ("每天十点睡") — typed as recurring, never a deadline
       range     fuzzy window ("年底前换工作")
     """
 
@@ -430,12 +430,59 @@ def _parse_english_due(raw: str, now: datetime, tz: str) -> Optional[TypedTime]:
     return None
 
 
+_ISO_DUE = re.compile(
+    r"(\d{4})-(\d{1,2})-(\d{1,2})"
+    r"(?:[T ](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?"
+    r"(Z|[+-]\d{2}:?\d{2})?)?"
+)
+
+
+def _parse_iso_due(raw: str, now: datetime, tz: str) -> Optional[TypedTime]:
+    """Parse an ISO date/datetime before the natural-language parsers.
+
+    The old order let English month/weekday rules run first. That is harmless
+    for a bare ``2026-10-25`` but turns strings such as
+    ``2026-10-25T19:00:00+08:00`` into ``None``. ISO is the machine format, so
+    it gets a strict full-string match and the correct offset.
+    """
+    match = _ISO_DUE.fullmatch(raw)
+    if not match:
+        return None
+    try:
+        day = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
+
+    clock: Optional[datetime] = None
+    if match.group(4) is not None:
+        try:
+            clock = datetime(
+                day.year, day.month, day.day,
+                int(match.group(4)), int(match.group(5)),
+                int(match.group(6) or 0),
+                tzinfo=_zone(tz),
+            )
+        except ValueError:
+            return None
+        offset = match.group(7)
+        if offset:
+            # A supplied offset wins; then convert to the caller's zone so the
+            # local calendar date and the clock are consistent.
+            parsed = datetime.fromisoformat(
+                raw.replace("Z", "+00:00")
+            )
+            clock = parsed.astimezone(_zone(tz))
+            day = clock.date()
+    return _typed(day, clock, now, raw, tz)
+
+
 def parse_due(text: str, now: Optional[datetime] = None, tz: str = DEFAULT_TZ) -> Optional[TypedTime]:
     """Parse common Chinese and English time expressions into a typed slot.
 
-    Returns ``None`` when there is no date, or when the expression is a habit
-    (``每天十点睡``). Explicit past expressions return ``kind="past"`` so the
-    caller can refuse to write them as deadlines.
+    Returns ``None`` when there is no date. Habit expressions
+    (``每天十点睡``) return ``kind="recurring"`` with no due timestamp; explicit
+    past expressions return ``kind="past"``. Callers that write deadlines
+    refuse both kinds.
     """
     tz = tz or DEFAULT_TZ
     now = _aware(now, tz)
@@ -443,37 +490,47 @@ def parse_due(text: str, now: Optional[datetime] = None, tz: str = DEFAULT_TZ) -
     if not raw:
         return None
 
-    # Recurring habits are not deadlines. TypedTime has the field, but
-    # parse_due intentionally returns None so they never enter the due bucket.
+    # Recurring habits are a typed category of their own, not deadlines.
+    # Returning the type makes `recurring` reachable in the public contract;
+    # due_for_write and IntentStore still refuse to turn it into a deadline.
     if re.search(r"每(?:天|日|周|星期|礼拜|月)", raw):
-        return None
-    if re.search(r"\b(?:every|each)\s+(?:day|week|month|year|morning|night)\b", raw, re.IGNORECASE):
-        return None
+        return TypedTime(kind="recurring", raw=raw, confidence=0.8)
+    if re.search(
+        r"\b(?:every|each)\s+(?:day|week|month|year|morning|night|monday|tuesday|"
+        r"wednesday|thursday|friday|saturday|sunday)\b",
+        raw, re.IGNORECASE,
+    ):
+        return TypedTime(kind="recurring", raw=raw, confidence=0.8)
+
+    iso_due = _parse_iso_due(raw, now, tz)
+    if iso_due is not None:
+        return iso_due
 
     english = _parse_english_due(raw, now, tz)
     if english is not None:
         return english
 
-    # ISO dates are the language-neutral form used by APIs/MCP examples.
-    iso = re.fullmatch(
-        r"(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ](\d{1,2}):(\d{2})(?::\d{2})?)?",
-        raw,
-    )
-    if iso:
-        try:
-            day = date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
-        except ValueError:
-            return None
-        clock = None
-        if iso.group(4) is not None:
-            try:
-                clock = datetime.combine(
-                    day, dt_time(int(iso.group(4)), int(iso.group(5))),
-                    tzinfo=_zone(tz),
-                )
-            except ValueError:
-                return None
-        return _typed(day, clock, now, raw)
+    # Weekends are ranges, not a single day. Check longest prefix first:
+    # "下下周末" contains the substring "下周末".
+    for token, weeks in (("下下周末", 2), ("下周末", 1), ("这周末", 0), ("本周末", 0)):
+        if token in raw:
+            monday = now.date() - timedelta(days=now.weekday()) + timedelta(days=7 * weeks)
+            start = datetime.combine(monday + timedelta(days=5), dt_time(0, 0), tzinfo=_zone(tz))
+            end = datetime.combine(monday + timedelta(days=6), dt_time(23, 59, 59), tzinfo=_zone(tz))
+            return TypedTime(
+                kind="past" if end.timestamp() < now.timestamp() else "due",
+                raw=raw, at=end.timestamp(),
+                start=start.timestamp(), end=end.timestamp(),
+                confidence=0.8,
+            )
+
+    # "下下周三" must not be read as "下周三" (the substring starts later).
+    match = re.search(r"下下周([一二三四五六日天])", raw)
+    if match:
+        monday = now.date() - timedelta(days=now.weekday()) + timedelta(days=14)
+        day = monday + timedelta(days=_WEEKDAY[match.group(1)])
+        clock = _parse_clock(raw, day, tz)
+        return _typed(day, clock, now, raw, tz)
 
     match = re.search(r"上周([一二三四五六日天])", raw)
     if match:
@@ -560,10 +617,25 @@ def parse_due(text: str, now: Optional[datetime] = None, tz: str = DEFAULT_TZ) -
         clock = _parse_clock(raw, day, tz)
         return _typed(day, clock, now, raw)
 
+    # Month-end must resolve the month named by the expression. The old code
+    # checked the bare substring "月底" first, so "下个月底" silently became
+    # *this* month's end.
+    for prefix, offset in (
+        ("下下个月", 2), ("下个月", 1), ("下下月", 2), ("下月", 1),
+        ("这个月", 0), ("本月", 0),
+    ):
+        if prefix + "底" in raw or prefix + "末" in raw:
+            month_index = now.month - 1 + offset
+            year = now.year + month_index // 12
+            month = month_index % 12 + 1
+            day = date(year, month, calendar.monthrange(year, month)[1])
+            clock = _parse_clock(raw, day, tz)
+            return _typed(day, clock, now, raw, tz)
+
     if "月底" in raw:
         day = date(now.year, now.month, calendar.monthrange(now.year, now.month)[1])
         clock = _parse_clock(raw, day, tz)
-        return _typed(day, clock, now, raw)
+        return _typed(day, clock, now, raw, tz)
 
     if "年底前" in raw or "年底" in raw:
         end = datetime.combine(date(now.year, 12, 31), dt_time(23, 59, 59), tzinfo=_zone(tz)).timestamp()
@@ -581,6 +653,10 @@ def parse_due(text: str, now: Optional[datetime] = None, tz: str = DEFAULT_TZ) -
             dt_time(23, 59, 59), tzinfo=_zone(tz),
         ).timestamp()
         return TypedTime(kind="range", raw=raw, at=end, start=start, end=end, confidence=0.6)
+
+    if "下下周" in raw:
+        monday = now.date() - timedelta(days=now.weekday()) + timedelta(days=14)
+        return _typed(monday, None, now, raw)
 
     if "下周" in raw:
         monday = now.date() - timedelta(days=now.weekday()) + timedelta(days=7)

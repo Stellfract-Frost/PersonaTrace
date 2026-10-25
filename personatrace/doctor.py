@@ -37,11 +37,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     backend, mode = build_backend()
     path = getattr(backend, "path", None)
     print(f"  后端: {mode}" + (f" ({path})" if path else ""))
+    degraded = False
     if mode == "memory":
+        from .memory_v2 import last_backend_warning
+
+        warning = last_backend_warning()
+        if warning:
+            degraded = True
+            print(f"  警告: {warning}")
         print("  注意: 进程内后端，重启会丢（如需落盘请去掉 PERSONA_DB=off）")
 
     mem = MemoryV2(backend=backend, user_id=PROBE_USER)
-    ok = True
+    ok = not degraded
 
     try:
         mem.purge()

@@ -7,8 +7,8 @@
    收益：①不再需要每天全量扫描（读时惰性计算，O(1)）②高价值信息不会和低价值信息同样速度腐烂。
 
 2. 无法回溯：原实现只有 updated，问不出"他 9 月是什么状态"。
-   改：双时态（valid_from / invalid_at），用 Redis ZSET 按时间索引，
-        as_of 查询 = ZRANGEBYSCORE + 过滤 invalid_at，O(log N + M)，无需重算。
+   改：双时态（valid_from / invalid_at + recorded_at），每次写追加 version 快照；
+        as_of 查询取"那一刻已知的版本"再套有效窗口，后写的纠正不会改写过去。
 
 3. 并发覆盖（P0）：侦探 load→LLM→save 之间无事务，后写者静默覆盖前写者。
    改：SET NX + fencing token + version CAS，冲突即重放。
@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import threading
@@ -32,6 +33,14 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+_LAST_BACKEND_WARNING: Optional[str] = None
+
+
+def last_backend_warning() -> Optional[str]:
+    """Return why the last durable backend fell back to memory, if it did."""
+    return _LAST_BACKEND_WARNING
 
 try:  # pragma: no cover - 取决于运行环境
     import redis as _redis
@@ -136,6 +145,40 @@ class MemoryBackend:
     def zcard(self, key: str) -> int:
         with self._lock:
             return len(self._z.get(key, {}))
+
+    # -- compare-and-swap / compare-and-delete --
+    def cas_hash(self, key: str, expected_version: int, mapping: Dict[str, Any]) -> bool:
+        """Atomically replace a hash only when its version field still matches.
+
+        ``expected_version=0`` means "the record must not exist yet". This is
+        the primitive behind the kernel's optimistic CAS: a guard lock can
+        expire, but a stale writer must never overwrite a newer record.
+        """
+        with self._lock:
+            bucket = self._h.get(key)
+            current = 0
+            if bucket is not None:
+                try:
+                    current = int(bucket.get("version", 0))
+                except (TypeError, ValueError):
+                    current = 0
+            if current != int(expected_version or 0):
+                return False
+            target = self._h.setdefault(key, {})
+            for field_name, value in mapping.items():
+                target[str(field_name)] = (
+                    value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                )
+            return True
+
+    def compare_delete(self, key: str, expected: str) -> bool:
+        """Delete a key only when its value is still the caller's token."""
+        with self._lock:
+            if key in self._kv and self._kv.get(key) == expected:
+                self._kv.pop(key, None)
+                self._ttl.pop(key, None)
+                return True
+            return False
 
 
 class SQLiteBackend:
@@ -292,6 +335,49 @@ class SQLiteBackend:
                 "SELECT COUNT(*) FROM t_zset WHERE key = ?", (key,)
             ).fetchone()[0]
 
+    # -- compare-and-swap / compare-and-delete --
+    def cas_hash(self, key: str, expected_version: int, mapping: Dict[str, Any]) -> bool:
+        rows = [
+            (key, str(f), v if isinstance(v, str) else json.dumps(v, ensure_ascii=False))
+            for f, v in mapping.items()
+        ]
+        expected = int(expected_version or 0)
+        with self._lock:
+            try:
+                # BEGIN IMMEDIATE makes the read-check-write sequence atomic
+                # across processes, not just inside this Python process.
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    "SELECT value FROM t_hash WHERE key = ? AND field = 'version'",
+                    (key,),
+                ).fetchone()
+                current = 0
+                if row is not None:
+                    try:
+                        current = int(row[0])
+                    except (TypeError, ValueError):
+                        current = 0
+                if current != expected:
+                    self._conn.rollback()
+                    return False
+                self._conn.executemany(
+                    "INSERT INTO t_hash (key, field, value) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key, field) DO UPDATE SET value = excluded.value",
+                    rows,
+                )
+                self._conn.commit()
+                return True
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def compare_delete(self, key: str, expected: str) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM t_kv WHERE key = ? AND value = ?", (key, expected)
+            )
+            return cur.rowcount == 1
+
     def delete(self, *keys: str) -> None:
         with self._lock, self._conn:
             for k in keys:
@@ -357,6 +443,31 @@ class RedisBackend:
     def zcard(self, key: str) -> int:
         return int(self.r.zcard(self.p + key))
 
+    # -- compare-and-swap / compare-and-delete --
+    _CAS_SCRIPT = """
+    local current = redis.call('HGET', KEYS[1], 'version')
+    if not current then current = '0' end
+    if current ~= ARGV[1] then return 0 end
+    for i = 2, #ARGV, 2 do
+        redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
+    end
+    return 1
+    """
+
+    def cas_hash(self, key: str, expected_version: int, mapping: Dict[str, Any]) -> bool:
+        args: List[str] = [str(int(expected_version or 0))]
+        for field_name, value in mapping.items():
+            args.append(str(field_name))
+            args.append(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))
+        return bool(self.r.eval(self._CAS_SCRIPT, 1, self.p + key, *args))
+
+    def compare_delete(self, key: str, expected: str) -> bool:
+        script = (
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+            "return redis.call('DEL', KEYS[1]) else return 0 end"
+        )
+        return bool(self.r.eval(script, 1, self.p + key, expected))
+
 
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser("~"), ".personatrace", "memory.db")
 DB_ENV = "PERSONA_DB"
@@ -370,17 +481,31 @@ def build_backend(url: Optional[str] = None, db_path: Optional[str] = None) -> T
     - PERSONA_DB=off / memory:// / :memory: → 进程内（重启即丢，仅用于测试）
     任何异常都退回进程内，绝不让"记不住"升级成"起不来"。
     """
-    if _redis is not None and url != "memory://":
+    global _LAST_BACKEND_WARNING
+    _LAST_BACKEND_WARNING = None
+    # Only an explicit Redis URL opts into Redis. Merely installing the redis
+    # package must not make a caller who asked for SQLite connect to localhost.
+    if _redis is not None and url and url != "memory://":
         try:
-            return RedisBackend(url or "redis://127.0.0.1:6379/0"), "redis"
-        except Exception:
-            pass
+            return RedisBackend(url), "redis"
+        except Exception as exc:
+            logger.warning("Redis backend unavailable (%s); trying SQLite", exc)
     target = db_path or os.environ.get(DB_ENV) or DEFAULT_DB_PATH
     if str(target).strip().lower() in {"", "off", "none", "memory", "memory://", ":memory:"}:
         return MemoryBackend(), "memory"
     try:
         return SQLiteBackend(str(target)), "sqlite"
-    except Exception:
+    except Exception as exc:
+        # Fail-open is still the right policy: a broken memory must not stop
+        # the host's conversation. Fail-silent is not: a memory product that
+        # quietly becomes in-process loses everything on restart. Make the
+        # degradation visible in logs and in `personatrace-doctor`.
+        detail = f"SQLite backend unavailable at {target!r}: {exc}"
+        _LAST_BACKEND_WARNING = detail
+        logger.warning(
+            "%s; falling back to in-process memory (data will not survive restart)",
+            detail,
+        )
         return MemoryBackend(), "memory"
 
 
@@ -391,12 +516,20 @@ def build_backend(url: Optional[str] = None, db_path: Optional[str] = None) -> T
 CATEGORY_STABILITY: Dict[str, float] = {
     "explicit_facts": 520.0,
     "identity": 300.0,
+    "traits": 300.0,
     "constraints": 180.0,
+    "boundaries": 365.0,
     "expertise": 240.0,
+    "decision_style": 240.0,
     "likes": 90.0,
     "dislikes": 90.0,
+    "interests": 120.0,
+    "style_notes": 180.0,
+    "behavior_patterns": 120.0,
+    "interpersonal": 180.0,
     "projects": 60.0,
     "goals": 45.0,
+    "habit": 90.0,
     "state": 10.0,
 }
 DEFAULT_STABILITY = 60.0
@@ -411,6 +544,10 @@ GC_AT = 0.05                    # 保留率低于此值才允许回收
 GC_MAX_HITS = 1                 # 只被提过一次的才回收（重复出现过的留着）
 MENTION_RAW_LIMIT = 300         # 第三方记录里的原话上限
 MENTION_STABILITY_FACTOR = 0.4  # 二手信息失真快：稳定度打 4 折
+DEFAULT_PINNED_CATEGORIES = ("boundaries", "constraints", "identity")
+MAX_BELIEF_VERSIONS = 200       # per-belief transaction-time history budget
+CAS_RETRIES = 8                 # optimistic replay attempts on a version conflict
+_UNSET = object()               # distinguish "not supplied" from "explicitly clear"
 
 
 def stability_from_half_life(half_life_days: float) -> float:
@@ -423,6 +560,55 @@ def retention(stability: float, days: float) -> float:
     if days <= 0:
         return 1.0
     return math.exp(-days / max(1e-6, stability))
+
+
+def _bigrams(text: Any) -> set:
+    flat = "".join(str(text or "").lower().split())
+    if not flat:
+        return set()
+    if len(flat) == 1:
+        return {flat}
+    return {flat[i:i + 2] for i in range(len(flat) - 1)}
+
+
+def _lexical_scores(query: str, rows: Iterable[Dict[str, Any]]) -> Dict[str, float]:
+    """Candidate-set IDF over character bigrams.
+
+    This is the kernel's own lexical channel. It deliberately returns 0.5 for
+    no overlap (neutral), not 0: two unrelated strings must not look like
+    negative evidence. It is duplicated, in a smaller form, from ``recall`` so
+    the kernel keeps its stdlib-only import surface.
+    """
+    rows = list(rows)
+    query_grams = _bigrams(query)
+    if not query_grams:
+        return {str(row.get("id")): 0.5 for row in rows}
+
+    docs = {str(row.get("id")): _bigrams(row.get("label", "")) for row in rows}
+    df: Dict[str, int] = {}
+    for grams in docs.values():
+        for gram in grams:
+            df[gram] = df.get(gram, 0) + 1
+    total = max(1, len(docs))
+    idf = {}
+    for gram, count in df.items():
+        idf[gram] = math.log((total + 1.0) / (count + 1.0)) + 1.0
+    query_weight = sum(idf.get(gram, 1.0) for gram in query_grams)
+    if query_weight <= 0:
+        return {str(row.get("id")): 0.5 for row in rows}
+
+    q = str(query or "").lower()
+    out: Dict[str, float] = {}
+    for row in rows:
+        key = str(row.get("id"))
+        label = str(row.get("label", "")).lower()
+        if label and (label in q or q in label):
+            out[key] = 1.0
+            continue
+        shared = sum(idf.get(gram, 1.0) for gram in query_grams if gram in docs[key])
+        overlap = shared / query_weight
+        out[key] = 0.5 if overlap <= 0 else 0.5 + 0.5 * min(1.0, overlap)
+    return out
 
 
 def reinforce(stability: float, current_r: float, k: float = REINFORCE_K, cap: Optional[float] = None) -> float:
@@ -451,6 +637,10 @@ class Belief:
     stability: float
     last_support_ts: float
     valid_from_ts: float
+    # Transaction time: when this version was written to the store. Valid time
+    # is valid_from_ts/invalid_at_ts; the pair is what makes queries real
+    # snapshots instead of filters over the latest row.
+    recorded_at_ts: float = 0.0
     invalid_at_ts: Optional[float] = None
     status: str = "active"
     hits: int = 1
@@ -475,6 +665,7 @@ class Belief:
             "category": self.category, "label": self.label,
             "confidence": self.confidence, "stability": self.stability,
             "last_support_ts": self.last_support_ts, "valid_from_ts": self.valid_from_ts,
+            "recorded_at_ts": self.recorded_at_ts or self.valid_from_ts,
             "invalid_at_ts": self.invalid_at_ts if self.invalid_at_ts else "",
             "status": self.status, "hits": self.hits, "dimension": self.dimension,
             "due_at_ts": self.due_at_ts if self.due_at_ts else "",
@@ -500,6 +691,7 @@ class Belief:
             stability=num("stability", DEFAULT_STABILITY),
             last_support_ts=num("last_support_ts", time.time()),
             valid_from_ts=num("valid_from_ts", time.time()),
+            recorded_at_ts=num("recorded_at_ts", 0.0) or num("valid_from_ts", time.time()),
             invalid_at_ts=num("invalid_at_ts") or None,
             status=raw.get("status", "active"), hits=int(num("hits", 1)),
             dimension=raw.get("dimension", "identity"),
@@ -516,6 +708,16 @@ def belief_id(user_id: str, track: str, category: str, label: str) -> str:
     """确定性主键：同一条结论永远落到同一个 id，写入天然幂等。"""
     key = f"{user_id}:{track}:{category}:{label.lower().strip()}"
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, key))
+
+
+def evidence_key(user_id: str, bid: str, eid: str) -> str:
+    """L0 key scoped by belief so one episode cannot overwrite another belief's row."""
+    return f"evidence:{user_id}:{bid}:{eid}"
+
+
+def legacy_evidence_key(user_id: str, eid: str) -> str:
+    """Legacy key; kept readable for existing databases."""
+    return f"evidence:{user_id}:{eid}"
 
 
 class Conflict(Exception):
@@ -540,8 +742,10 @@ class Guard:
 
     def release(self, user_id: str) -> None:
         token = self._held.pop(user_id, None)
-        if token and self.b.get(f"lock:{user_id}") == token:
-            self.b.delete(f"lock:{user_id}")
+        if token:
+            # Compare-and-delete: never release a lock that a later writer has
+            # already acquired after our TTL expired.
+            self.b.compare_delete(f"lock:{user_id}", token)
 
     def __enter__(self):
         return self
@@ -587,6 +791,13 @@ class MemoryV2:
     def _bk(self, bid: str) -> str:
         return f"belief:{self.user_id}:{bid}"
 
+    def _hk(self, bid: str) -> str:
+        """Transaction-time index for one belief: version -> recorded_at."""
+        return f"history:{self.user_id}:{bid}"
+
+    def _hvk(self, bid: str, version: Any) -> str:
+        return f"history:{self.user_id}:{bid}:{int(version)}"
+
     @property
     def _tl(self) -> str:
         return f"timeline:{self.user_id}"
@@ -595,7 +806,118 @@ class MemoryV2:
     def _bh(self) -> str:
         return f"behavior:{self.user_id}"
 
-    # -- 写入：追加证据 + 间隔效应强化（幂等） --
+    def _delete_evidence(self, uid: str, bid: str, eid: str) -> None:
+        self.b.delete(evidence_key(uid, bid, eid))
+        legacy = self.b.hgetall(legacy_evidence_key(uid, eid))
+        if legacy.get("belief_id") == bid:
+            self.b.delete(legacy_evidence_key(uid, eid))
+
+    # -- transaction-time history -------------------------------------------
+    def _trim_history(self, bid: str) -> None:
+        total = self.b.zcard(self._hk(bid))
+        if total <= MAX_BELIEF_VERSIONS:
+            return
+        pairs = self.b.zrangebyscore(self._hk(bid), 0, float("inf"))
+        for member, _score in pairs[: total - MAX_BELIEF_VERSIONS]:
+            self.b.delete(self._hvk(bid, member))
+            self.b.zrem(self._hk(bid), member)
+
+    def _record_version(self, belief: Belief) -> None:
+        self.b.hset(self._hvk(belief.id, belief.version), belief.to_hash())
+        self.b.zadd(self._hk(belief.id), {str(belief.version): belief.recorded_at_ts})
+        self._trim_history(belief.id)
+
+    def _backfill_base(self, bid: str, raw: Dict[str, str]) -> None:
+        """Give pre-history records one base version before they are updated.
+
+        Older databases only have the current row. Without a base version an
+        ``as_of`` query before the first new write would see the new value,
+        which is exactly the mutable-filter bug this history removes.
+        """
+        if not raw or self.b.zcard(self._hk(bid)) > 0:
+            return
+        old = Belief.from_hash(raw)
+        old.recorded_at_ts = old.valid_from_ts
+        self._record_version(old)
+
+    def _known_belief(self, bid: str, known_as_of: float) -> Optional[Belief]:
+        pairs = self.b.zrangebyscore(self._hk(bid), 0, known_as_of)
+        if not pairs:
+            return None
+        # Version order is transaction order. recorded_at can be backdated by
+        # an importer, so version is the tie-breaker that must win.
+        member = max(
+            pairs,
+            key=lambda pair: (
+                int(pair[0]) if str(pair[0]).lstrip("-").isdigit() else 0,
+                pair[1],
+            ),
+        )[0]
+        raw = self.b.hgetall(self._hvk(bid, member))
+        return Belief.from_hash(raw) if raw else None
+
+    def _belief_at(self, bid: str, known_as_of: float) -> Optional[Belief]:
+        """Return the row as it was known at ``known_as_of``.
+
+        If the record predates history, the current row is used only when it
+        was written at or before the query time. A current row written later
+        is not knowledge the system had at that time.
+        """
+        raw = self.b.hgetall(self._bk(bid))
+        current = Belief.from_hash(raw) if raw else None
+        if self.b.zcard(self._hk(bid)) > 0:
+            seen = self._known_belief(bid, known_as_of)
+            # The current row is written just before its history snapshot. If
+            # a reader lands in that tiny window (or history was trimmed), use
+            # the current row only when it is already known at this time.
+            if (
+                current is not None
+                and current.recorded_at_ts <= known_as_of
+                and (seen is None or current.version > seen.version)
+            ):
+                return current
+            return seen
+        if current is None:
+            return None
+        if current.recorded_at_ts and current.recorded_at_ts > known_as_of:
+            return None
+        return current
+
+    def _valid_belief_at(self, bid: str, known_as_of: float, as_of: float) -> Optional[Belief]:
+        """Valid-time view with current knowledge, across revival intervals.
+
+        A revival starts a new validity window at ``valid_from``. Asking
+        "what do we now know about T" must still return the earlier window if
+        T predates the revival. If the newest known window starts after T, walk
+        the transaction history back to the newest window that contains T.
+        """
+        pairs = self.b.zrangebyscore(self._hk(bid), 0, known_as_of)
+        if not pairs:
+            return None
+        versions: List[tuple[int, Belief]] = []
+        for member, _score in pairs:
+            raw = self.b.hgetall(self._hvk(bid, member))
+            if not raw:
+                continue
+            try:
+                version = int(member)
+            except (TypeError, ValueError):
+                version = 0
+            versions.append((version, Belief.from_hash(raw)))
+
+        # The highest-version window that has started by T is the current
+        # knowledge about T. Older windows are not consulted: an invalidation
+        # or a later revival supersedes them for the intervening period.
+        started = [(version, belief) for version, belief in versions
+                   if belief.valid_from_ts <= as_of]
+        if not started:
+            return None
+        _version, chosen = max(started, key=lambda item: item[0])
+        if chosen.invalid_at_ts is None or as_of < chosen.invalid_at_ts:
+            return chosen
+        return None
+
+    # -- 写入：追加证据 + 间隔效应强化（幂等 + CAS） --
     def observe(
         self,
         category: str,
@@ -607,9 +929,10 @@ class MemoryV2:
         dimension: str = "identity",
         reasoning: str = "",
         evidence_text: str = "",
-        due_at_ts: Optional[float] = None,
-        time_kind: str = "none",
-        time_raw: str = "",
+        due_at_ts: Any = _UNSET,
+        time_kind: Any = _UNSET,
+        time_raw: Any = _UNSET,
+        revive: bool = True,
         ts: Optional[float] = None,
     ) -> Belief:
         ts = ts if ts is not None else time.time()
@@ -620,12 +943,22 @@ class MemoryV2:
                 "observation into one record (same id, hits accumulating)."
             )
         bid = belief_id(self.user_id, track, category, label)
-        with self.guard:
-            self._acquire_with_retry()
-            try:
+        self._acquire_with_retry()
+        try:
+            for attempt in range(CAS_RETRIES):
                 raw = self.b.hgetall(self._bk(bid))
+                old_version = 0
+                previous_recorded = 0.0
+                timeline_score = ts
                 if raw:
+                    self._backfill_base(bid, raw)
+                    try:
+                        old_version = int(raw.get("version") or 0)
+                    except (TypeError, ValueError):
+                        old_version = 0
                     belief = Belief.from_hash(raw)
+                    previous_recorded = belief.recorded_at_ts
+                    timeline_score = belief.valid_from_ts
                     r = belief.retention_now(ts)
                     belief.stability = reinforce(
                         belief.stability,
@@ -640,57 +973,129 @@ class MemoryV2:
                         belief.evidence.append(evidence_id)
                     if reasoning:
                         belief.reasoning = reasoning
-                    if due_at_ts:
-                        belief.due_at_ts = due_at_ts
-                    if time_kind and time_kind != "none":
-                        belief.time_kind = time_kind
-                    if time_raw:
-                        belief.time_raw = time_raw
+                    # A caller that passes the field can clear it; one that
+                    # omits it preserves the previous value. This is what
+                    # stops an old due date from sticking forever.
+                    if due_at_ts is not _UNSET:
+                        belief.due_at_ts = due_at_ts or None
+                    if time_kind is not _UNSET:
+                        belief.time_kind = time_kind or "none"
+                    if time_raw is not _UNSET:
+                        belief.time_raw = time_raw or ""
+                    # Re-observation after a correction is new evidence, so it
+                    # reopens the validity window. Do it only after the prior
+                    # invalidation took effect; an observation before that
+                    # timestamp belongs to the old window.
+                    invalid_at = belief.invalid_at_ts
+                    if revive and invalid_at is None and belief.status != "active":
+                        belief.status = "active"
+                    elif revive and invalid_at is not None and ts >= invalid_at:
+                        belief.status = "active"
+                        belief.valid_from_ts = ts
+                        belief.invalid_at_ts = None
+                        timeline_score = min(timeline_score, ts)
                 else:
+                    initial_due = None if due_at_ts is _UNSET else (due_at_ts or None)
+                    initial_kind = "none" if time_kind is _UNSET else (time_kind or "none")
+                    initial_raw = "" if time_raw is _UNSET else (time_raw or "")
                     belief = Belief(
                         id=bid, user_id=self.user_id, track=track, category=category,
                         label=label, confidence=confidence,
                         stability=CATEGORY_STABILITY.get(category, DEFAULT_STABILITY),
                         last_support_ts=ts, valid_from_ts=ts,
-                        dimension=dimension, reasoning=reasoning,
-                        due_at_ts=due_at_ts, time_kind=time_kind, time_raw=time_raw,
+                        recorded_at_ts=ts, dimension=dimension, reasoning=reasoning,
+                        due_at_ts=initial_due, time_kind=initial_kind, time_raw=initial_raw,
                         evidence=[evidence_id] if evidence_id else [],
                     )
+
                 # L0：原文只存一次，检索时不碰它（这是成本优势的来源）
+                eid = ""
                 if evidence_text:
-                    eid = evidence_id or f"{bid}:{int(ts * 1000)}"
-                    self.b.hset(f"evidence:{self.user_id}:{eid}", {
-                        "belief_id": bid, "ts": ts, "raw_text": evidence_text[:EVIDENCE_RAW_LIMIT],
-                    })
+                    eid = evidence_id or f"{bid}:{int(ts * 1000)}:{old_version + 1}"
                     if eid not in belief.evidence:
                         belief.evidence.append(eid)
                 # 证据列表要有上限：长期运行的宿主机（QQ 群）会无限 append，
                 # 每次 to_hash 都要重新序列化整张表，而且 L0 原文只增不删。
                 if len(belief.evidence) > MAX_EVIDENCE:
                     for stale in belief.evidence[:-MAX_EVIDENCE]:
-                        self.b.delete(f"evidence:{self.user_id}:{stale}")
+                        self._delete_evidence(self.user_id, bid, stale)
                     belief.evidence = belief.evidence[-MAX_EVIDENCE:]
-                belief.version += 1
-                self.b.hset(self._bk(bid), belief.to_hash())
-                self.b.zadd(self._tl, {bid: belief.valid_from_ts})
+
+                belief.version = old_version + 1
+                belief.recorded_at_ts = max(ts, previous_recorded)
+                if not self.b.cas_hash(self._bk(bid), old_version, belief.to_hash()):
+                    # Someone wrote between our read and our CAS (usually a
+                    # guard lock that expired). Re-read and replay; never
+                    # overwrite their version with our stale copy.
+                    time.sleep(min(0.05, 0.002 * (attempt + 1)))
+                    continue
+
+                if eid:
+                    record = {
+                        "belief_id": bid, "ts": ts,
+                        "raw_text": evidence_text[:EVIDENCE_RAW_LIMIT],
+                    }
+                    self.b.hset(evidence_key(self.user_id, bid, eid), record)
+                    # Keep the old key populated for readers of older
+                    # databases, but never let a second belief overwrite it.
+                    legacy = self.b.hgetall(legacy_evidence_key(self.user_id, eid))
+                    if not legacy or legacy.get("belief_id") == bid:
+                        self.b.hset(legacy_evidence_key(self.user_id, eid), record)
+                self._record_version(belief)
+                self.b.zadd(self._tl, {bid: timeline_score})
                 return belief
-            finally:
-                self.guard.release(self.user_id)
+            raise Conflict(f"CAS failed after {CAS_RETRIES} attempts for {bid}")
+        finally:
+            self.guard.release(self.user_id)
 
     # -- 失效：不删除，只打时间戳（Graphiti 原则） --
-    def invalidate(self, bid: str, ts: Optional[float] = None, status: str = "deprecated") -> bool:
-        """把一条结论标记为失效。返回是否真的命中了记录（之前静默返回 None，调用方分不清成败）。"""
+    def invalidate(
+        self,
+        bid: str,
+        ts: Optional[float] = None,
+        status: str = "deprecated",
+        *,
+        recorded_at: Optional[float] = None,
+    ) -> bool:
+        """Invalidate a belief and record a new transaction-time version.
+
+        ``ts`` is valid time (when the fact stopped being true). The write time
+        is now unless ``recorded_at`` is supplied, which lets an importer
+        reconstruct what the system knew at a historical moment. Repeated
+        invalidations never extend an existing validity window.
+        """
+        now = time.time()
+        valid_to = ts if ts is not None else now
+        txn_time = recorded_at if recorded_at is not None else now
         self._acquire_with_retry()
         try:
-            raw = self.b.hgetall(self._bk(bid))
-            if not raw:
-                return False
-            belief = Belief.from_hash(raw)
-            belief.status = status
-            belief.invalid_at_ts = ts if ts is not None else time.time()
-            belief.version += 1
-            self.b.hset(self._bk(bid), belief.to_hash())
-            return True
+            for attempt in range(CAS_RETRIES):
+                raw = self.b.hgetall(self._bk(bid))
+                if not raw:
+                    return False
+                self._backfill_base(bid, raw)
+                try:
+                    old_version = int(raw.get("version") or 0)
+                except (TypeError, ValueError):
+                    old_version = 0
+                belief = Belief.from_hash(raw)
+                previous_recorded = belief.recorded_at_ts
+                belief.status = status
+                if belief.invalid_at_ts is None:
+                    belief.invalid_at_ts = valid_to
+                else:
+                    # A correction may shorten validity, never silently extend
+                    # it: invalidate(t1) followed by invalidate(t2>t1) would
+                    # otherwise make the belief alive again between t1 and t2.
+                    belief.invalid_at_ts = min(belief.invalid_at_ts, valid_to)
+                belief.version = old_version + 1
+                belief.recorded_at_ts = max(txn_time, previous_recorded)
+                if not self.b.cas_hash(self._bk(bid), old_version, belief.to_hash()):
+                    time.sleep(min(0.05, 0.002 * (attempt + 1)))
+                    continue
+                self._record_version(belief)
+                return True
+            raise Conflict(f"CAS failed after {CAS_RETRIES} attempts for {bid}")
         finally:
             self.guard.release(self.user_id)
 
@@ -713,9 +1118,11 @@ class MemoryV2:
                 except ValueError:
                     evidence_ids = []
                 for eid in evidence_ids:
-                    self.b.delete(f"evidence:{uid}:{eid}")
+                    self._delete_evidence(uid, bid, eid)
                 removed += 1
-            self.b.delete(f"belief:{uid}:{bid}")
+            for member, _score in list(self.b.zrangebyscore(f"history:{uid}:{bid}", 0, float("inf"))):
+                self.b.delete(f"history:{uid}:{bid}:{member}")
+            self.b.delete(f"history:{uid}:{bid}", f"belief:{uid}:{bid}")
         for mid, _score in list(self.b.zrangebyscore(f"mentions:{uid}", 0, float("inf"))):
             self.b.delete(f"mention:{uid}:{mid}")
         self.b.delete(
@@ -730,15 +1137,28 @@ class MemoryV2:
         include_archived: bool = False,
         include_invalidated: bool = False,
         expand: int = 0,
+        known_as_of: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
+        """Return beliefs valid at ``as_of`` as the system knew them then.
+
+        By default ``known_as_of`` equals ``as_of``: this is snapshot
+        semantics, so a later correction cannot rewrite the past. Pass
+        ``known_as_of=time.time()`` to ask "what do we currently know about
+        that date", which is the old valid-time-only behaviour.
+        """
         as_of = as_of if as_of is not None else time.time()
+        known = known_as_of if known_as_of is not None else as_of
         rows = self.b.zrangebyscore(self._tl, 0, as_of)
         out: List[Dict[str, Any]] = []
         for bid, _score in rows:
-            raw = self.b.hgetall(self._bk(bid))
-            if not raw:
+            if known_as_of is not None:
+                belief = self._valid_belief_at(bid, known, as_of)
+                if belief is None:
+                    belief = self._belief_at(bid, known)
+            else:
+                belief = self._belief_at(bid, known)
+            if belief is None:
                 continue
-            belief = Belief.from_hash(raw)
             if belief.valid_from_ts > as_of:
                 continue
             if belief.invalid_at_ts and belief.invalid_at_ts <= as_of and not include_invalidated:
@@ -757,15 +1177,27 @@ class MemoryV2:
         item_vecs: Optional[Dict[str, Iterable[float]]] = None,
         as_of: Optional[float] = None,
         k: int = 15,
-        pinned_categories: Tuple[str, ...] = ("constraints", "identity"),
+        pinned_categories: Tuple[str, ...] = DEFAULT_PINNED_CATEGORIES,
         expand: int = 0,
+        *,
+        query: Optional[str] = None,
+        known_as_of: Optional[float] = None,
     ) -> Dict[str, Any]:
+        """Rank beliefs by relevance and retention.
+
+        ``query`` gives the kernel its own lexical channel. Before this, every
+        item received the same constant similarity, so the kernel could only
+        sort by recency and honestly scored 2% on the 200/50 fixture. Vector
+        scoring is still optional; lexical works with the standard library.
+        """
         as_of = as_of if as_of is not None else time.time()
-        pool = self.state(as_of=as_of, expand=expand)
+        pool = self.state(as_of=as_of, expand=expand, known_as_of=known_as_of)
         pinned = [x for x in pool if x["category"] in pinned_categories]
         rest = [x for x in pool if x["category"] not in pinned_categories]
 
         qv = list(query_vec) if query_vec is not None else None
+        qtext = (query or "").strip().lower()
+        lex = _lexical_scores(qtext, rest) if qtext else {}
 
         def cos(a: Iterable[float], b: Iterable[float]) -> float:
             a, b = list(a), list(b)
@@ -777,20 +1209,37 @@ class MemoryV2:
 
         scored = []
         for item in rest:
-            sim = 0.5
-            if qv is not None and item_vecs and item["id"] in item_vecs:
-                sim = cos(qv, item_vecs[item["id"]])
+            key = str(item["id"])
+            if qtext and item["label"] and (
+                item["label"].lower() in qtext or qtext in item["label"].lower()
+            ):
+                sim = 1.0
+            else:
+                parts = []
+                if qv is not None and item_vecs and key in item_vecs:
+                    parts.append(cos(qv, item_vecs[key]))
+                if qtext:
+                    parts.append(lex.get(key, 0.5))
+                sim = sum(parts) / len(parts) if parts else 0.5
             # 相关度主导，保持率调制：陈旧的即使相似也要降权
-            score = (sim ** 1.0) * (0.35 + 0.65 * item["retention"])
+            score = (0.15 + 0.85 * sim) * (0.35 + 0.65 * item["retention"])
             scored.append((score, item))
         scored.sort(key=lambda x: -x[0])
         picked = pinned + [it for _, it in scored[: max(0, k - len(pinned))]]
         hidden = [it for _, it in scored[max(0, k - len(pinned)):]]
         return {
             "shown": picked,
+            # Aliases shared with the outer ranker. ``pinned_count`` was the
+            # only spelling before; probes that used rank() expected a list.
+            "pinned": pinned,
+            "cross": [],
+            "hidden": hidden,
             "hidden_count": len(hidden),
             "pinned_count": len(pinned),
+            "candidates": len(pool),
+            "k": int(k),
             "as_of": as_of,
+            "query": query or "",
             "backend": self.mode,
         }
 
@@ -798,10 +1247,31 @@ class MemoryV2:
         """回表：只在命中后才读原文。这是"表层检索不碰具体语句"的兑现点。"""
         out: List[str] = []
         for eid in reversed(belief.evidence[-max(1, limit):]):
-            raw = self.b.hgetall(f"evidence:{self.user_id}:{eid}")
+            raw = self.b.hgetall(evidence_key(self.user_id, belief.id, eid))
+            if not raw:
+                # Records written before the per-belief key still resolve.
+                raw = self.b.hgetall(legacy_evidence_key(self.user_id, eid))
             text = (raw or {}).get("raw_text", "")
             if text:
                 out.append(text[:max_chars])
+        return out
+
+    def enrich(self, rows: Iterable[Dict[str, Any]], expand: int = 1) -> List[Dict[str, Any]]:
+        """Add L0/context only to rows that survived the ranking budget."""
+        if not expand:
+            return list(rows)
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            raw = self.b.hgetall(self._bk(str(item.get("id", ""))))
+            if not raw:
+                out.append(item)
+                continue
+            belief = Belief.from_hash(raw)
+            item["reasoning"] = belief.reasoning
+            item["evidence_count"] = len(belief.evidence)
+            item["evidence_texts"] = self._evidence_snippets(belief, limit=expand)
+            out.append(item)
         return out
 
     def _view(self, belief: Belief, as_of: float, r: float, expand: int = 0) -> Dict[str, Any]:
@@ -813,6 +1283,10 @@ class MemoryV2:
         view = {
             "id": belief.id, "track": belief.track, "category": belief.category,
             "label": belief.label, "dimension": belief.dimension,
+            "status": belief.status,
+            "valid_from_ts": belief.valid_from_ts,
+            "invalid_at_ts": belief.invalid_at_ts,
+            "recorded_at_ts": belief.recorded_at_ts,
             "confidence": belief.confidence,
             "retention": round(r, 3),
             "effective_confidence": round(belief.confidence * r, 3),
@@ -890,27 +1364,36 @@ class MemoryV2:
         ).hex[:32]
 
         ts = time.time()
-        old = self.b.hgetall(self._mbk(mid))
-        hits = int(old.get("hits", 0)) + 1
-        self.b.hset(self._mbk(mid), {
-            "subject": self.user_id,
-            "actor": actor,
-            "kind": kind,
-            "category": category,
-            "label": label,
-            "confidence": max(0.0, min(1.0, confidence)),
-            "verified": verified,
-            "group_key": group_key,
-            "ts": ts,
-            "hits": hits,
-            "raw": (evidence_text or "")[:MENTION_RAW_LIMIT],
-        })
-        self.b.zadd(self._mk(), {mid: ts})
-        self.b.ztrim_last(self._mk(), MAX_MENTIONS)
-        return {
-            "id": mid, "actor": actor, "kind": kind, "label": label,
-            "confidence": confidence, "verified": verified, "hits": hits,
-        }
+        for attempt in range(CAS_RETRIES):
+            old = self.b.hgetall(self._mbk(mid))
+            try:
+                version = int(old.get("version") or 0)
+            except (TypeError, ValueError):
+                version = 0
+            hits = int(old.get("hits", 0)) + 1
+            mapping = {
+                "subject": self.user_id,
+                "actor": actor,
+                "kind": kind,
+                "category": category,
+                "label": label,
+                "confidence": max(0.0, min(1.0, confidence)),
+                "verified": verified,
+                "group_key": group_key,
+                "ts": ts,
+                "hits": hits,
+                "raw": (evidence_text or "")[:MENTION_RAW_LIMIT],
+                "version": version + 1,
+            }
+            if self.b.cas_hash(self._mbk(mid), version, mapping):
+                self.b.zadd(self._mk(), {mid: ts})
+                self.b.ztrim_last(self._mk(), MAX_MENTIONS)
+                return {
+                    "id": mid, "actor": actor, "kind": kind, "label": label,
+                    "confidence": confidence, "verified": verified, "hits": hits,
+                }
+            time.sleep(min(0.05, 0.002 * (attempt + 1)))
+        raise Conflict(f"CAS failed after {CAS_RETRIES} attempts for mention {mid}")
 
     def mentions(self, kind: Optional[str] = None, limit: int = 20,
                  group_key: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -978,8 +1461,12 @@ class MemoryV2:
             if dry_run:
                 continue
             for eid in belief.evidence:
-                self.b.delete(f"evidence:{self.user_id}:{eid}")
-            self.b.delete(self._bk(bid))
+                self._delete_evidence(self.user_id, bid, eid)
+            for member, _score in list(
+                self.b.zrangebyscore(self._hk(bid), 0, float("inf"))
+            ):
+                self.b.delete(self._hvk(bid, member))
+            self.b.delete(self._hk(bid), self._bk(bid))
             self.b.zrem(self._tl, bid)
         return {"scanned": scanned, "removed": removed, "evidence": evidence_rows}
 
@@ -1045,6 +1532,11 @@ class MemoryV2:
             "beliefs": self.b.zcard(self._tl),
             "behavior_events": self.b.zcard(self._bh),
         }
+
+    def close(self) -> None:
+        close = getattr(self.b, "close", None)
+        if callable(close):
+            close()
 
 
 # ---------------------------------------------------------------- 提示词装配

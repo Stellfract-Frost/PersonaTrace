@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 DEFAULT_TZ = "Asia/Shanghai"
 DEFAULT_EPISODE_TTL_DAYS = 90
+MAX_EPISODE_CANDIDATES = 5000
 ALLOWED_SOURCES = frozenset({"direct", "bridge", "console"})
 logger = logging.getLogger(__name__)
 
@@ -31,26 +32,38 @@ _CJK = re.compile(r"[\u4e00-\u9fff]")
 _WORD = re.compile(r"[a-zA-Z0-9_]+")
 RETROSPECTIVE_MARKERS = (
     "上次", "之前", "那天", "上周", "昨天", "还记得", "聊过", "说过",
-    "以前", "当时", "last time", "previously", "remember when",
-    # English temporal recall. Without these the episode branch only fires on
-    # Chinese questions, which makes retrospective search unreachable for an
-    # English conversation log.
-    "ago", "remember", "recall", "back then", "used to", "earlier",
-    "last week", "last month", "last year", "yesterday", "overnight",
-    "how many", "when did", "how long", "between",
-    "what date", "which day", "which event", "happened first",
-    "in order", "order from first", "more recently", "most recent",
-    "before", "after", "this week", "next week", "last week",
-    "order", "first", "last monday", "last tuesday", "last wednesday",
-    "last thursday", "last friday", "last saturday", "last sunday",
-    "past month", "past week", "past weekend", "past few", "past two",
-    "past three", "what was the date", "what was the", "how old", "most in",
+    "以前", "当时",
 )
+
+# English must use phrases/word boundaries. Substring matching made
+# "Chicago" match "ago", "order a pizza" match "order", and "my first task"
+# match "first", which replayed transcripts for ordinary queries.
+_RETROSPECTIVE_PATTERNS = tuple(re.compile(pattern) for pattern in (
+    r"\b(?:last|previous|prior)\s+(?:time|week|month|year|weekend|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    r"\b(?:remember|recall)\b",
+    r"\b(?:back then|used to|earlier|previously)\b",
+    r"\b(?:yesterday|overnight|ago)\b",
+    r"\bhow many\s+(?:days?|weeks?|months?|years?|hours?|minutes?)\b",
+    r"\bwhen did\b",
+    r"\bwhat (?:date|day|year)\b",
+    r"\bwhich (?:day|event|month|year)\b",
+    r"\bhappened first\b",
+    r"\border of\b",
+    r"\bin order\b",
+    r"\bmore recently\b|\bmost recent\b",
+    r"\bpast (?:week|month|weekend|few|two|three)\b",
+    r"\bwhat was the date\b",
+    r"\bhow old\b",
+    r"\bwhat did\b.*\bbefore\b",
+))
 
 
 def has_retrospective(query: str) -> bool:
     text = (query or "").lower()
-    return any(marker in text for marker in RETROSPECTIVE_MARKERS)
+    if any(marker in text for marker in RETROSPECTIVE_MARKERS):
+        return True
+    return any(pattern.search(text) for pattern in _RETROSPECTIVE_PATTERNS)
 
 
 def _zone(tz: str) -> ZoneInfo:
@@ -78,6 +91,10 @@ def _epoch(value: Any) -> Optional[float]:
         return parsed.timestamp()
     except (TypeError, ValueError):
         return None
+
+
+def _like_escape(text: str) -> str:
+    return text.replace("~", "~~").replace("%", "~%").replace("_", "~_")
 
 
 def _tokens(text: str) -> List[str]:
@@ -296,23 +313,41 @@ class EpisodeStore:
         """Lexical + recency retrieval inside an optional time window."""
         after_ts = _epoch(after)
         before_ts = _epoch(before)
-        sql = "SELECT * FROM episodes WHERE user_id = ?"
-        params: List[Any] = [user_id]
-        if after_ts is not None:
-            sql += " AND ts >= ?"
-            params.append(after_ts)
-        if before_ts is not None:
-            sql += " AND ts <= ?"
-            params.append(before_ts)
-        sql += " ORDER BY ts DESC LIMIT 500"
-        with self._lock:
-            rows = self.conn.execute(sql, params).fetchall()
-        episodes = [self._from_row(row) for row in rows]
-        if not episodes:
-            return []
         q = (query or "").strip()
+        base = "SELECT * FROM episodes WHERE user_id = ?"
+        base_params: List[Any] = [user_id]
+        if after_ts is not None:
+            base += " AND ts >= ?"
+            base_params.append(after_ts)
+        if before_ts is not None:
+            base += " AND ts <= ?"
+            base_params.append(before_ts)
+
         if not q:
+            sql = base + " ORDER BY ts DESC LIMIT 500"
+            with self._lock:
+                rows = self.conn.execute(sql, base_params).fetchall()
+            episodes = [self._from_row(row) for row in rows]
             return [e.to_dict(include_reply, self.tz) for e in episodes[:max(1, int(limit))]]
+
+        # Do not rank only the newest 500 rows: with >500 episodes the oldest
+        # ones become permanently unsearchable, and a vector id outside that
+        # window is dropped. Build a lexical candidate set with SQL LIKE
+        # (bounded) and fetch vector hits by id independently.
+        q_tokens = list(dict.fromkeys(tok for tok in _tokens(q) if tok))[:24]
+        candidates: List[Episode] = []
+        if q_tokens:
+            clauses = []
+            candidate_params = list(base_params)
+            for token in q_tokens:
+                escaped = _like_escape(token)
+                clauses.append("(user_msg LIKE ? ESCAPE '~' OR ai_reply LIKE ? ESCAPE '~')")
+                candidate_params.extend([f"%{escaped}%", f"%{escaped}%"])
+            sql = base + " AND (" + " OR ".join(clauses) + ")"
+            sql += f" ORDER BY ts DESC LIMIT {MAX_EPISODE_CANDIDATES}"
+            with self._lock:
+                rows = self.conn.execute(sql, candidate_params).fetchall()
+            candidates = [self._from_row(row) for row in rows]
 
         vector_hits: List[tuple[float, Episode]] = []
         if self.vector_index is not None:
@@ -321,18 +356,26 @@ class EpisodeStore:
                     q, user_id=user_id, limit=max(10, int(limit) * 3),
                     after=after_ts, before=before_ts,
                 )
-                by_id = {e.id: e for e in episodes}
+                ids = [str(hit.get("id")) for hit in hits if hit.get("id")]
+                fetched = self.get_many(ids)
                 for hit in hits:
-                    episode = by_id.get(str(hit.get("id")))
-                    if episode is not None:
-                        vector_hits.append((float(hit.get("score", 0.0)), episode))
+                    episode = fetched.get(str(hit.get("id")))
+                    if episode is None:
+                        continue
+                    if episode.user_id != user_id:
+                        continue
+                    if after_ts is not None and episode.ts < after_ts:
+                        continue
+                    if before_ts is not None and episode.ts > before_ts:
+                        continue
+                    vector_hits.append((float(hit.get("score", 0.0)), episode))
             except Exception:
                 logger.warning("episode vector query failed; using lexical fallback", exc_info=True)
 
         q_set = set(_tokens(q))
         lexical_hits: List[tuple[float, Episode]] = []
-        if q_set:
-            docs = [(e, _tokens(e.user_msg + " " + e.ai_reply)) for e in episodes]
+        if q_set and candidates:
+            docs = [(e, _tokens(e.user_msg + " " + e.ai_reply)) for e in candidates]
             df = {tok: 0 for tok in q_set}
             for _ep, toks in docs:
                 tok_set = set(toks)
@@ -374,6 +417,25 @@ class EpisodeStore:
             except Exception:
                 logger.warning("episode vector delete failed", exc_info=True)
         return cur.rowcount > 0
+
+    def prune(
+        self,
+        user_id: Optional[str] = None,
+        *,
+        max_age_days: float = DEFAULT_EPISODE_TTL_DAYS,
+        now: Any = None,
+    ) -> int:
+        """Delete episodes older than the configured retention window.
+
+        There is no background scheduler; the host calls this explicitly.
+        """
+        if max_age_days is None or float(max_age_days) <= 0:
+            return 0
+        now_ts = _epoch(now) if now is not None else datetime.now(_zone(self.tz)).timestamp()
+        if now_ts is None:
+            now_ts = datetime.now(_zone(self.tz)).timestamp()
+        cutoff = now_ts - float(max_age_days) * 86400.0
+        return self.purge(user_id=user_id, before=cutoff)
 
     def purge(self, user_id: Optional[str] = None, before: Any = None) -> int:
         sql = "DELETE FROM episodes"

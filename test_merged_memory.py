@@ -135,6 +135,19 @@ def test_inject_includes_agenda_and_dated_belief():
     assert "截止" in text
 
 
+def test_build_context_enriches_only_selected_rows():
+    mm = make([])
+    mm.write(beliefs=[{
+        "category": "identity", "label": "名字叫小陌",
+        "reasoning": "用户自我介绍", "evidence_text": "我叫小陌",
+    }], now=NOW)
+    pack = mm.build_context("我叫什么", now=NOW)
+    assert pack.pinned
+    row = pack.pinned[0]
+    assert row["reasoning"] == "用户自我介绍"
+    assert "我叫小陌" in row["evidence_texts"]
+
+
 def test_build_context_returns_structured_sections():
     mm = make([{
         "beliefs": [{"category": "identity", "label": "名字叫小陌"}],
@@ -169,6 +182,47 @@ def test_hidden_hint_survives_truncation():
     assert "memory_recall" in text
     assert len(text) >= 20
 
+def test_default_constructor_uses_one_durable_file(tmp_path, monkeypatch):
+    db = tmp_path / "one.db"
+    monkeypatch.setenv("PERSONA_DB", str(db))
+    first = MergedMemory(user_id="alice")
+    first.write(
+        beliefs=[{"category": "identity", "label": "名字叫小陌"}],
+        intentions=[{"action": "交报告", "due": "后天"}],
+        source="direct",
+        now=NOW,
+    )
+    first.record_turn("上次说要交报告", "收到", session_id="s1", now=NOW)
+    first.close()
+
+    second = MergedMemory(user_id="alice")
+    try:
+        assert [row["label"] for row in second.memory.state(as_of=NOW.timestamp())] == ["名字叫小陌"]
+        assert [item.title for item in second.intents.list("alice")] == ["交报告"]
+        assert second.episodes_search("报告", limit=2)[0]["user_msg"] == "上次说要交报告"
+    finally:
+        second.close()
+
+
+def test_write_does_not_silently_truncate_to_four():
+    mm = make([])
+    result = mm.write(
+        beliefs=[{"category": "likes", "label": f"喜欢测试项{index}"} for index in range(6)],
+        intentions=[{"action": f"任务{index}", "importance": 0.5} for index in range(6)],
+        now=NOW,
+    )
+    assert result["requested_beliefs"] == 6
+    assert result["requested_intentions"] == 6
+    assert result["beliefs"] == 6
+    assert result["intentions"] == 6
+    assert result["distinct_beliefs"] == 6
+    assert result["distinct_intentions"] == 6
+    assert result["dropped_beliefs"] == 0
+    assert result["dropped_intentions"] == 0
+    assert len(mm.memory.state(as_of=NOW.timestamp())) == 6
+    assert len(mm.intents.list("u")) == 6
+
+
 def test_write_dedups_paraphrased_preference():
     mm = make([])
     mm.write(beliefs=[{"category": "likes", "label": "喜欢深色主题"}], now=NOW)
@@ -197,6 +251,31 @@ def test_write_does_not_merge_similar_but_different_labels():
     mm.write(beliefs=[{"category": "likes", "label": "喜欢猫"}], now=NOW)
     mm.write(beliefs=[{"category": "likes", "label": "喜欢猫毛"}], now=NOW)
     assert len(mm.memory.state(as_of=NOW.timestamp())) == 2
+
+
+def test_write_does_not_merge_one_character_month_change():
+    """Short labels need near-identity; 0.88 is not a paraphrase."""
+    mm = make([])
+    mm.write(beliefs=[{"category": "goals", "label": "计划明年三月去日本东京旅行"}], now=NOW)
+    mm.write(beliefs=[{"category": "goals", "label": "计划明年四月去日本东京旅行"}], now=NOW)
+    labels = {row["label"] for row in mm.memory.state(as_of=NOW.timestamp())}
+    assert labels == {"计划明年三月去日本东京旅行", "计划明年四月去日本东京旅行"}
+
+
+def test_write_does_not_merge_one_character_proper_noun():
+    mm = make([])
+    mm.write(beliefs=[{"category": "explicit_facts", "label": "项目代号是 Astra"}], now=NOW)
+    mm.write(beliefs=[{"category": "explicit_facts", "label": "项目代号是 Atlas"}], now=NOW)
+    labels = {row["label"] for row in mm.memory.state(as_of=NOW.timestamp())}
+    assert labels == {"项目代号是 Astra", "项目代号是 Atlas"}
+
+
+def test_write_does_not_merge_different_amounts():
+    mm = make([])
+    mm.write(beliefs=[{"category": "explicit_facts", "label": "预算是一万二千元"}], now=NOW)
+    mm.write(beliefs=[{"category": "explicit_facts", "label": "预算是一万五千元"}], now=NOW)
+    labels = {row["label"] for row in mm.memory.state(as_of=NOW.timestamp())}
+    assert labels == {"预算是一万二千元", "预算是一万五千元"}
 
 def test_remember_stores_episode_and_retrospective_context():
     mm = make([{

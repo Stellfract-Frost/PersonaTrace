@@ -11,6 +11,7 @@ denial, today-only skip and silence are explicit feedback events.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import uuid
@@ -516,6 +517,13 @@ class RoutineStore:
     @staticmethod
     def _questions(routine: Routine, style: str) -> List[str]:
         action = routine.action
+        chinese = bool(re.search(r"[\u4e00-\u9fff]", action))
+        if chinese:
+            if style == "open":
+                return ["你现在在做什么？", f"你是不是要去{action}？"]
+            if style == "check":
+                return [f"今天还有{action}吗？"]
+            return [f"你是不是要去{action}？", f"今天还有{action}吗？"]
         if style == "open":
             return [
                 "What are you up to right now?",

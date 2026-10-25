@@ -9,7 +9,7 @@ import pytest
 
 from personatrace.memory_v2 import (
     ARCHIVE_AT, CATEGORY_STABILITY, Conflict, MemoryBackend, MemoryV2,
-    belief_id, reinforce, retention, stability_from_half_life,
+    belief_id, evidence_key, reinforce, retention, stability_from_half_life,
 )
 
 DAY = 86400.0
@@ -160,6 +160,42 @@ def test_api_router():
 
     r = c.post("/v1/observe", json={"category": "goals", "label": "x"})  # 违反 min_length
     assert r.status_code == 422
+
+
+def test_api_typed_time_contract_and_invalidate_404():
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from personatrace.api_v2 import build_router
+
+    m = MemoryV2(backend=MemoryBackend(), user_id="api_typed")
+    app = FastAPI()
+    app.include_router(build_router(m))
+    c = TestClient(app)
+
+    due = time.time() + 2 * DAY
+    r = c.post("/v1/observe", json={
+        "category": "goals", "label": "有截止的 API 记录",
+        "due_at_ts": due, "time_kind": "due", "time_raw": "后天",
+    })
+    assert r.status_code == 200
+
+    # Omitted fields preserve; explicit null/"none" clears.
+    c.post("/v1/observe", json={"category": "goals", "label": "有截止的 API 记录"})
+    row = c.get("/v1/state").json()["beliefs"][0]
+    assert row["due_at_ts"] == due
+    assert row["time_kind"] == "due"
+
+    c.post("/v1/observe", json={
+        "category": "goals", "label": "有截止的 API 记录",
+        "due_at_ts": None, "time_kind": "none", "time_raw": "",
+    })
+    row = c.get("/v1/state").json()["beliefs"][0]
+    assert row["due_at_ts"] is None and row["time_kind"] == "none"
+
+    assert c.get("/v1/state").json()["as_of"] > 0
+    assert c.post("/v1/beliefs/does-not-exist/invalidate").status_code == 404
 
 
 def test_aging_lines_forward_looking():
@@ -354,7 +390,7 @@ def test_gc_reclaims_only_rare_old_beliefs():
 def test_evidence_raw_text_is_capped():
     m = MemoryV2(backend=MemoryBackend(), user_id="u:208")
     belief = m.observe("goals", "在准备四级", track="work", evidence_text="长" * 5000)
-    raw = m.b.hgetall(f"evidence:u:208:{belief.evidence[0]}")
+    raw = m.b.hgetall(evidence_key("u:208", belief.id, belief.evidence[0]))
     assert len(raw["raw_text"]) == 800, len(raw["raw_text"])
 
 
@@ -366,3 +402,185 @@ def test_overview_reports_archived():
     m.observe("state", "旧事", track="work", ts=time.time() - 400 * 86400)
     ov = m.overview()
     assert ov["beliefs"] == 2 and ov["live"] == 1 and ov["archived"] == 1
+
+
+def test_as_of_is_a_version_snapshot(mem):
+    """A later reinforcement must not rewrite what we believed earlier."""
+    t0 = time.time()
+    mem.observe("goals", "做时序记忆", track="work", confidence=0.4, ts=t0)
+    mem.observe("goals", "做时序记忆", track="work", confidence=0.9, ts=t0 + 5 * DAY)
+
+    at_t0 = mem.state(as_of=t0)
+    assert len(at_t0) == 1
+    assert at_t0[0]["hits"] == 1
+    assert at_t0[0]["confidence"] == 0.4
+
+    now_about_t0 = mem.state(as_of=t0, known_as_of=t0 + 10 * DAY)
+    assert now_about_t0[0]["hits"] == 2
+
+
+def test_known_as_of_recovers_the_pre_revival_window(mem):
+    t0 = time.time()
+    mem.observe("goals", "先有效后失效再复活", track="work", ts=t0)
+    bid = belief_id("u_test", "work", "goals", "先有效后失效再复活")
+    mem.invalidate(bid, ts=t0 + 10, recorded_at=t0 + 1)
+    mem.observe("goals", "先有效后失效再复活", track="work", ts=t0 + 30)
+
+    assert [row["label"] for row in mem.state(as_of=t0 + 5, known_as_of=t0 + 40)] == [
+        "先有效后失效再复活"
+    ]
+    assert mem.state(as_of=t0 + 20, known_as_of=t0 + 40) == []
+    assert [row["label"] for row in mem.state(as_of=t0 + 35, known_as_of=t0 + 40)] == [
+        "先有效后失效再复活"
+    ]
+
+
+def test_repeated_correction_does_not_extend_validity(mem):
+    t0 = time.time()
+    mem.observe("goals", "会被纠正的结论", track="work", ts=t0)
+    bid = belief_id("u_test", "work", "goals", "会被纠正的结论")
+    mem.invalidate(bid, ts=t0 + 10 * DAY, recorded_at=t0 + 1 * DAY)
+    mem.invalidate(bid, ts=t0 + 20 * DAY, recorded_at=t0 + 2 * DAY)
+
+    assert mem.state(as_of=t0 + 15 * DAY) == []
+    rows = mem.state(
+        as_of=t0 + 15 * DAY, known_as_of=t0 + 3 * DAY, include_invalidated=True,
+    )
+    assert len(rows) == 1
+    assert rows[0]["invalid_at_ts"] == pytest.approx(t0 + 10 * DAY)
+
+
+def test_cas_rejects_a_stale_version():
+    b = MemoryBackend()
+    m = MemoryV2(backend=b, user_id="u_cas")
+    m.observe("likes", "喜欢 CAS", track="work", ts=time.time())
+    bid = belief_id("u_cas", "work", "likes", "喜欢 cas")
+    key = m._bk(bid)
+    raw = b.hgetall(key)
+    version = int(raw["version"])
+
+    assert b.cas_hash(key, version, {"version": version + 1, "label": "first"}) is True
+    assert b.cas_hash(key, version, {"version": version + 2, "label": "stale"}) is False
+    assert b.hgetall(key)["label"] == "first"
+
+
+def test_boundaries_are_pinned_by_default(mem):
+    now = time.time()
+    mem.observe("boundaries", "不要在下班后打电话", track="persona", ts=now)
+    mem.observe("likes", "喜欢深色主题", track="work", ts=now)
+    result = mem.recall(as_of=now, k=2)
+    assert [row["category"] for row in result["pinned"]] == ["boundaries"]
+
+
+def test_recall_has_a_query_channel(mem):
+    now = time.time()
+    mem.observe("likes", "喜欢深色主题", track="work", ts=now - 60 * DAY)
+    mem.observe("likes", "喜欢浅色主题", track="work", ts=now)
+
+    res = mem.recall(as_of=now, k=2, query="深色")
+    assert res["shown"][0]["label"] == "喜欢深色主题"
+    assert res["query"] == "深色"
+    assert res["pinned"] == []
+    assert res["pinned_count"] == 0
+    assert res["cross"] == []
+    assert res["k"] == 2
+
+
+def test_guard_release_only_deletes_its_own_token(mem):
+    token = mem.guard.acquire("u_test")
+    assert token
+    # A new writer after TTL expiry must not be released by the stale owner.
+    mem.b.set("lock:u_test", "someone-else")
+    mem.guard.release("u_test")
+    assert mem.b.get("lock:u_test") == "someone-else"
+
+
+def test_evidence_rows_are_scoped_per_belief(mem):
+    first = mem.observe(
+        "goals", "项目 A", track="work", evidence_id="episode-1",
+        evidence_text="原文 A",
+    )
+    second = mem.observe(
+        "likes", "喜好 B", track="work", evidence_id="episode-1",
+        evidence_text="原文 B",
+    )
+    assert mem.b.hgetall(evidence_key("u_test", first.id, "episode-1"))["raw_text"] == "原文 A"
+    assert mem.b.hgetall(evidence_key("u_test", second.id, "episode-1"))["raw_text"] == "原文 B"
+
+    rows = mem.recall(query="项目 A", k=2, expand=1)["shown"]
+    item = next(row for row in rows if row["label"] == "项目 A")
+    assert "原文 A" in item["evidence_texts"]
+
+
+def test_observe_can_clear_due(mem):
+    now = time.time()
+    mem.observe(
+        "goals", "有截止的结论", track="work", ts=now,
+        due_at_ts=now + 2 * DAY, time_kind="due", time_raw="后天",
+    )
+    mem.observe(
+        "goals", "有截止的结论", track="work", ts=now + 60,
+        due_at_ts=None, time_kind="none", time_raw="",
+    )
+    row = mem.state(as_of=now + 120)[0]
+    assert row["due_at_ts"] is None
+    assert row["time_kind"] == "none"
+    assert row["time_raw"] == ""
+
+
+def test_observe_revives_invalidated_belief(mem):
+    now = time.time()
+    mem.observe("goals", "可以复活", track="work", ts=now)
+    bid = belief_id("u_test", "work", "goals", "可以复活")
+    mem.invalidate(bid, ts=now + 10, recorded_at=now + 1)
+    assert mem.state(as_of=now + 20) == []
+
+    revived = mem.observe("goals", "可以复活", track="work", ts=now + 30)
+    assert revived.hits == 2
+    assert revived.status == "active"
+    assert revived.invalid_at_ts is None
+    assert revived.valid_from_ts == now + 30
+
+    # The gap between invalidation and revival remains empty in a snapshot.
+    assert mem.state(as_of=now + 20) == []
+    # Before the invalidation the old version is still visible.
+    assert [x["label"] for x in mem.state(as_of=now + 5)] == ["可以复活"]
+    # After the revival it is visible again.
+    assert [x["label"] for x in mem.state(as_of=now + 40)] == ["可以复活"]
+
+
+def test_redis_needs_an_explicit_url(tmp_path, monkeypatch):
+    import personatrace.memory_v2 as mv
+
+    calls = []
+
+    def fake_redis(url):
+        calls.append(url)
+        raise RuntimeError("no redis")
+
+    monkeypatch.setattr(mv, "_redis", object())
+    monkeypatch.setattr(mv, "RedisBackend", fake_redis)
+    backend, mode = mv.build_backend(db_path=str(tmp_path / "sqlite.db"))
+    assert mode == "sqlite"
+    assert calls == []
+
+    _, mode2 = mv.build_backend(url="redis://example:6379/0", db_path=str(tmp_path / "x.db"))
+    assert calls == ["redis://example:6379/0"]
+    assert mode2 == "sqlite"          # failed Redis falls back to SQLite
+    mv._LAST_BACKEND_WARNING = None
+
+
+def test_sqlite_fallback_is_visible(monkeypatch, caplog):
+    import personatrace.memory_v2 as mv
+
+    def broken(_path):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(mv, "SQLiteBackend", broken)
+    with caplog.at_level("WARNING", logger="personatrace.memory_v2"):
+        backend, mode = mv.build_backend(url="memory://", db_path="ignored.db")
+    assert mode == "memory"
+    assert backend.__class__ is mv.MemoryBackend
+    assert "falling back to in-process memory" in caplog.text
+    assert "disk full" in (mv.last_backend_warning() or "")
+    mv._LAST_BACKEND_WARNING = None

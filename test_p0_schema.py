@@ -20,6 +20,15 @@ NOW = datetime(2026, 10, 23, 10, 0, tzinfo=Z)  # Friday
 def test_17_categories_two_tracks():
     assert len(ALL_CATEGORIES) == 17
     assert len(STABILITY_DAYS) == 17
+
+    # The stdlib kernel must not rely on MergedMemory to patch its table:
+    # standalone MemoryV2 users need the same 17 categories.
+    from personatrace.memory_v2 import CATEGORY_STABILITY
+
+    assert set(CATEGORY_STABILITY) == set(ALL_CATEGORIES)
+    for category in ALL_CATEGORIES:
+        assert CATEGORY_STABILITY[category] == STABILITY_DAYS[category]
+
     assert track_for("constraints") == "work"
     assert track_for("identity") == "persona"
     assert track_for("habit") == "persona"
@@ -116,9 +125,13 @@ def test_iso_date_is_a_language_neutral_due():
     assert parse_due("2026-10-20", NOW, TZ).kind == "past"
 
 
-def test_recurring_is_not_a_deadline():
-    assert parse_due("每天十点睡", NOW, TZ) is None
-    assert parse_due("每周三上课", NOW, TZ) is None
+def test_recurring_is_typed_but_not_a_deadline():
+    daily = parse_due("每天十点睡", NOW, TZ)
+    weekly = parse_due("每周三上课", NOW, TZ)
+    assert daily is not None and daily.kind == "recurring"
+    assert weekly is not None and weekly.kind == "recurring"
+    assert daily.due_ts is None
+    assert due_for_write(coerce_in({"category": "habit", "label": "每天十点睡"}), NOW, TZ) is None
 
 
 def test_clock_time_and_past_today():
@@ -145,7 +158,7 @@ def test_due_for_write_guards_narrative_and_uses_forward_fallback():
     assert datetime.fromtimestamp(typed.at, Z).strftime("%Y-%m-%d") == "2026-10-28"
 
 def test_english_relative_due_is_supported():
-    assert parse_due("every Tuesday", NOW, TZ) is None
+    assert parse_due("every Tuesday", NOW, TZ).kind == "recurring"
     assert parse_due("tomorrow", NOW, TZ).kind == "due"
     assert parse_due("yesterday", NOW, TZ).kind == "past"
     assert parse_due("in 3 days", NOW, TZ).kind == "due"
@@ -158,4 +171,38 @@ def test_english_relative_due_is_supported():
     tomorrow = parse_due("tomorrow at 8pm", NOW, TZ)
     assert tomorrow is not None
     assert datetime.fromtimestamp(tomorrow.at, Z).strftime("%H:%M") == "20:00"
+
+
+def test_relative_month_end_uses_the_named_month():
+    item = parse_due("下个月底前交", NOW, TZ)
+    assert item is not None
+    assert datetime.fromtimestamp(item.at, Z).strftime("%Y-%m-%d") == "2026-11-30"
+
+    item = parse_due("下下个月底", NOW, TZ)
+    assert item is not None
+    assert datetime.fromtimestamp(item.at, Z).strftime("%Y-%m-%d") == "2026-12-31"
+
+    item = parse_due("月底", NOW, TZ)
+    assert datetime.fromtimestamp(item.at, Z).strftime("%Y-%m-%d") == "2026-10-31"
+
+
+def test_next_next_week_is_not_next_week():
+    item = parse_due("下下周三", NOW, TZ)
+    assert item is not None
+    assert datetime.fromtimestamp(item.at, Z).strftime("%Y-%m-%d") == "2026-11-04"
+
+    item = parse_due("下周末", NOW, TZ)
+    assert item is not None
+    assert datetime.fromtimestamp(item.end, Z).strftime("%Y-%m-%d") == "2026-11-01"
+    assert item.kind == "due"
+
+
+def test_iso_datetime_with_offset():
+    item = parse_due("2026-10-25T19:00:00+08:00", NOW, TZ)
+    assert item is not None
+    assert datetime.fromtimestamp(item.at, Z).strftime("%H:%M") == "19:00"
+
+    utc = parse_due("2026-10-25T11:00:00Z", NOW, TZ)
+    assert utc is not None
+    assert datetime.fromtimestamp(utc.at, Z).strftime("%H:%M") == "19:00"
 

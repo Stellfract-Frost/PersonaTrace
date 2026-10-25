@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -18,15 +19,29 @@ from personatrace.merged_memory import MergedMemory
 
 @pytest.fixture(autouse=True)
 def fresh_mem():
-    mcp_server._mem = MemoryV2(backend=MemoryBackend(), user_id="mcp_user")
+    memory = MemoryV2(backend=MemoryBackend(), user_id="mcp_user")
+    mcp_server._mem = memory
     mcp_server._merged = MergedMemory(
-        memory=MemoryV2(backend=MemoryBackend(), user_id="mcp_user"),
+        memory=memory,
         intents=IntentStore(":memory:", default_tz="Asia/Shanghai"),
         user_id="mcp_user",
     )
     yield
     mcp_server._mem = None
     mcp_server._merged = None
+
+
+def _workspace_db(name):
+    """A DB under the repo (sandbox-safe on Windows), not the user's home."""
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    path = os.path.join(data_dir, name)
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.remove(path + suffix)
+        except OSError:
+            pass
+    return path
 
 
 def call(name, **args):
@@ -41,10 +56,19 @@ def payload(resp):
 
 
 def test_initialize_and_capabilities():
-    resp = mcp_server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
-    assert resp["result"]["protocolVersion"]
+    resp = mcp_server.handle({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": mcp_server.PROTOCOL_VERSION},
+    })
+    assert resp["result"]["protocolVersion"] == mcp_server.PROTOCOL_VERSION
     assert resp["result"]["capabilities"]["tools"] is not None
     assert resp["result"]["serverInfo"]["name"] == "personatrace-memory"
+
+    newer = mcp_server.handle({
+        "jsonrpc": "2.0", "id": 2, "method": "initialize",
+        "params": {"protocolVersion": "2099-01-01"},
+    })
+    assert newer["result"]["protocolVersion"] == mcp_server.PROTOCOL_VERSION
 
 
 def test_notification_has_no_response():
@@ -176,6 +200,168 @@ def test_routine_label_probe_feedback():
     assert payload(call("memory_routine_probe", now=now))["items"] == []
 
 
+def test_old_and_merged_tools_share_one_namespace():
+    """memory_observe / memory_state / memory_context must see the same user."""
+    payload(call("memory_observe", category="likes", label="喜欢单一命名空间", track="work"))
+    assert payload(call("memory_state"))["count"] == 1
+
+    context = payload(call("memory_context", query="单一命名空间"))
+    labels = [row["label"] for row in context["pinned"] + context["related"]]
+    assert "喜欢单一命名空间" in labels
+
+    payload(call("memory_remember", beliefs=[{"category": "identity", "label": "名字叫小陌"}]))
+    state = payload(call("memory_state"))
+    labels = [row["label"] for row in state["beliefs"]]
+    assert "名字叫小陌" in labels
+
+
+def test_batch_messages_are_handled_without_crashing():
+    batch = [
+        {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+         "params": {"name": "memory_observe",
+                    "arguments": {"category": "likes", "label": "批处理写入"}}},
+    ]
+    responses = mcp_server._handle_batch(batch)
+    assert [r["id"] for r in responses] == [1, 2]
+    assert responses[1]["result"]["isError"] is False
+
+    # Non-object / empty batches are protocol errors, not AttributeErrors.
+    assert mcp_server._handle_batch([])["error"]["code"] == -32600
+    assert mcp_server._handle_batch([1, "x"])[0]["error"]["code"] == -32600
+
+
+def test_batch_stdio_does_not_kill_the_process():
+    db = _workspace_db("_test_mcp_batch.db")
+    batch = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    ]
+    here = os.path.dirname(os.path.abspath(__file__))
+    env = dict(os.environ, PYTHONPATH=here, PERSONA_DB=db,
+               PERSONA_USER_ID="stdio_batch")
+    proc = subprocess.run(
+        [sys.executable, "-m", "personatrace.mcp_server"],
+        input=json.dumps(batch, ensure_ascii=False) + "\n",
+        capture_output=True, text=True, encoding="utf-8", timeout=60, env=env,
+    )
+    assert proc.returncode == 0, proc.stderr[-800:]
+    responses = json.loads(proc.stdout)
+    assert [r["id"] for r in responses] == [1, 2]
+
+
+def test_worker_timeout_is_real_and_restartable(monkeypatch):
+    db = _workspace_db("_test_mcp_timeout.db")
+    monkeypatch.setenv("PERSONA_DB", db)
+    monkeypatch.setenv("PERSONA_USER_ID", "timeout_user")
+    runner = mcp_server._ProcessRunner(timeout=1.0)
+    try:
+        started = time.monotonic()
+        result = runner.call("__sleep__", {"seconds": 5})
+        elapsed = time.monotonic() - started
+        assert result["isError"] is True
+        assert "memory_timeout" in result["content"][0]["text"]
+        assert elapsed < 3.0, "timeout must terminate the worker, not wait for sleep"
+
+        again = runner.call("memory_state", {})
+        assert again["isError"] is False
+        assert "count" in json.loads(again["content"][0]["text"])
+    finally:
+        runner.close()
+
+
+def test_mcp_naive_iso_uses_the_store_timezone(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    monkeypatch.setenv("PERSONA_TZ", "Asia/Shanghai")
+    expected = datetime(2026, 10, 25, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    assert mcp_server._as_ts("2026-10-25") == expected
+    assert mcp_server._as_ts("2026-10-25T00:00:00+08:00") == expected
+    assert mcp_server._as_ts("2026-10-24T16:00:00Z") == expected
+
+
+def test_in_memory_mode_does_not_create_an_off_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("PERSONA_DB", "off")
+    monkeypatch.chdir(tmp_path)
+    mcp_server._merged = None
+    mcp_server._mem = None
+
+    written = payload(call("memory_observe", category="likes", label="内存模式"))
+    assert written["hits"] == 1
+    assert payload(call("memory_state"))["count"] == 1
+    assert not (tmp_path / "off").exists()
+
+
+def test_observe_typed_time_preserves_clears_and_revives():
+    now = "2026-10-27T10:00:00+08:00"
+    later = "2026-10-27T11:00:00+08:00"
+    due = 1893456000  # 2030-01-01, far outside the test date
+
+    first = payload(call(
+        "memory_observe", category="goals", label="带截止的观察", track="work",
+        due_at_ts=due, time_kind="due", time_raw="2030 年", now=now,
+    ))
+    # Omitting typed-time fields preserves the old value.
+    payload(call("memory_observe", category="goals", label="带截止的观察",
+                 track="work", now=later))
+    row = payload(call("memory_state", as_of="2026-10-27T10:30:00+08:00"))["beliefs"][0]
+    assert row["due_at_ts"] == due
+    assert row["time_kind"] == "due"
+
+    # Explicit null / "none" / "" clears it.
+    payload(call(
+        "memory_observe", category="goals", label="带截止的观察", track="work",
+        due_at_ts=None, time_kind="none", time_raw="", now="2026-10-27T11:30:00+08:00",
+    ))
+    row = payload(call("memory_state", as_of="2026-10-27T11:45:00+08:00"))["beliefs"][0]
+    assert row["due_at_ts"] is None
+    assert row["time_kind"] == "none"
+
+    payload(call("memory_correct", belief_id=first["id"],
+                 ts="2026-10-27T12:00:00+08:00",
+                 recorded_at="2026-10-27T12:00:00+08:00"))
+    payload(call("memory_observe", category="goals", label="带截止的观察",
+                 track="work", now="2026-10-27T13:00:00+08:00"))
+    state = payload(call("memory_state", as_of="2026-10-27T13:30:00+08:00"))
+    assert [row["label"] for row in state["beliefs"]] == ["带截止的观察"]
+
+
+def test_stdio_stdout_is_utf8_even_with_gbk_locale():
+    """The pipe must be UTF-8 even when the host decodes with a GBK locale."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    db = _workspace_db("_test_mcp_utf8.db")
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    ]
+    stdin = ("\n".join(json.dumps(r, ensure_ascii=False) for r in requests) + "\n").encode("utf-8")
+    env = dict(os.environ, PYTHONPATH=here, PERSONA_DB=db,
+               PERSONA_USER_ID="utf8_user", PYTHONIOENCODING="gbk")
+    proc = subprocess.run(
+        [sys.executable, "-m", "personatrace.mcp_server"],
+        input=stdin, capture_output=True, timeout=60, env=env,
+    )
+    assert proc.returncode == 0, proc.stderr[-800:]
+    text = proc.stdout.decode("utf-8")          # strict; no locale involvement
+    responses = [json.loads(line) for line in text.splitlines() if line.strip()]
+    assert [r["id"] for r in responses] == [1, 2]
+    assert any("description" in tool for tool in responses[1]["result"]["tools"])
+
+
+def test_internal_error_does_not_leak_traceback(monkeypatch):
+    def boom(_msg, _runner=None):
+        raise RuntimeError("secret internal path /tmp/private")
+
+    monkeypatch.setattr(mcp_server, "_handle_single", boom)
+    resp = mcp_server._safe_handle({"jsonrpc": "2.0", "id": 7, "method": "ping"})
+    message = resp["error"]["message"]
+    assert resp["error"]["code"] == -32603
+    assert "Traceback" not in message
+    assert "secret internal path" not in message
+
+
 def test_unknown_tool_and_method():
     resp = call("memory_nope")
     assert resp["error"]["code"] == -32602
@@ -212,9 +398,13 @@ def test_stdio_end_to_end():
          "params": {"name": "memory_state", "arguments": {}}},
     ]
     stdin = "\n".join(json.dumps(r, ensure_ascii=False) for r in requests) + "\n"
+    db = _workspace_db("_test_mcp_stdio.db")
+    env = dict(os.environ, PYTHONPATH=here, PERSONA_DB=db,
+               PERSONA_USER_ID="stdio_user")
     proc = subprocess.run(
         [sys.executable, "-m", "personatrace.mcp_server"],
-        input=stdin, capture_output=True, text=True, timeout=60, cwd=here,
+        input=stdin, capture_output=True, text=True, encoding="utf-8",
+        timeout=60, cwd=here, env=env,
     )
     assert proc.returncode == 0, proc.stderr[-800:]
     lines = [json.loads(x) for x in proc.stdout.strip().splitlines() if x.strip()]

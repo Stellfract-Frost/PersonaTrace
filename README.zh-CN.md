@@ -98,6 +98,8 @@ memory = MergedMemory(
     user_id="alice",
     sqlite_path="./personatrace.db",   # one file for beliefs and intentions
 )
+# 不传 sqlite_path 也是持久的：belief / intention / episode / routine
+# 都会落到默认后端路径，而不是 belief 持久、其余三者在内存。
 
 memory.write(
     beliefs=[{
@@ -157,27 +159,37 @@ weekly。`skipped_today`、`denied`、沉默是三种不同状态。
 memory_predict / memory_remember / memory_context / memory_agenda /
 memory_turn / memory_episodes / memory_routine_probe / memory_routine_feedback /
 memory_routine_label`。
-合并工具默认 SQLite，不需要 Redis。每次调用 8 秒超时，出错返回错误结果，
-不抛异常拖垮宿主的对话。
+合并工具默认 SQLite，不需要 Redis。每次调用在独立 worker 进程里跑，8 秒到期
+直接杀进程：不会出现「返回超时但后台还在写」，也不会把线程池占满；下一次调用
+重新拉起 worker。`PERSONA_DB=off` 的进程内模式只用于测试。JSON-RPC batch
+数组会被逐条处理，坏消息返回错误而不是打挂 stdio 循环。两族工具共用同一个
+`PERSONA_USER_ID` 和同一个库，`memory_observe` 写的东西 `memory_context` 能看到。
 
 ## 评测
 
 200 条信条、50 条查询，只看方向，不当统计结论。之前 12/10 的 90.0% 太容易：
 
 ```text
-v2 native (no pinned)       2.0% / 0.020
-v2 native (pinned)          2.0% / 0.020
-v1 string                  61.0% / 0.657
-v1 + bge                   73.0% / 0.737
-outer + bge                74.0% / 0.770
-outer + bge + time facet   76.0% / 0.760
+method                      recall@3     MRR
+v2 native (query, no pinned)    66.0%   0.707
+v2 native (pinned)               2.0%   0.020
+v1 string                       61.0%   0.657
+v1 + bge                        73.0%   0.737
+outer lex                       61.0%   0.637
+outer + bge                     74.0%   0.770
+outer + bge + time facet        76.0%   0.760
 ```
 
+`v2 native (query)` 是内核自己的字面检索，不套外层；`pinned` 是压力样例：
+`k=3` 时有四十条 pinned，预算全被 pinned 吃掉，所以仍是 2.0%。
 `outer + bge` → `+ time facet`：recall +2.0，MRR -0.010。时间桶可能把一条正确的
-due 记录排到同样正确的语义记录前面；引用大 fixture 的数字。
+due 记录排到同样正确的语义记录前面；引用大 fixture 的数字。CI 用确定性的
+`outer lex` 通道卡 60%。
 
 ```bash
 python scripts/eval_recall.py
+# CI 闸门（确定性的字面通道，不需要 embedding 模型）
+python scripts/eval_recall.py --no-embed --fail-under 0.60 --gate-method "outer lex"
 ```
 
 ### LongMemEval temporal-reasoning 子集
@@ -215,9 +227,10 @@ episode hook 在 133 题中命中 132 题（20 题 smoke 为 20/20）；合并�
 | 短期 intention：importance / TTL / anti-nag | 已发布 |
 | 保守的词面去重 | 已发布 |
 | `MergedMemory` + MCP | 已发布 |
-| episode + 回溯检索 | 已发布（1.6.3） |
-| weekly routine + in-turn probe | 已发布（1.6.3） |
+| episode + 回溯检索 | 已发布（1.6.5） |
+| weekly routine + in-turn probe | 已发布（1.6.5） |
 | v1 → v2 迁移脚本 | 有；默认 dry-run |
+| CI：Windows/Linux 测试 + recall 闸门 | 已发布 |
 | graph memory | 实验性，未接默认检索 |
 | `PersonaManager` 默认切到合并路径 | 未做（M3） |
 

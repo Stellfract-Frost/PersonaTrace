@@ -102,6 +102,8 @@ memory = MergedMemory(
     user_id="alice",
     sqlite_path="./personatrace.db",   # one file for the whole memory
 )
+# Omitting sqlite_path is also durable now: beliefs, intentions, episodes and
+# routines all follow the default backend path.
 
 memory.write(
     beliefs=[{
@@ -178,8 +180,13 @@ no Redis or server setup is required.
 | `memory_routine_feedback` | confirmed / denied / skipped_today / unanswered / ended |
 | `memory_routine_label` | explicit weekly routine with term/exceptions |
 
-Every call has an 8s timeout and returns an error result instead of raising.
-A failing memory must never take the host's conversation down.
+Every tool call runs in one isolated worker process with an 8s deadline. A
+timeout kills the worker, so a slow call cannot keep writing behind the error
+result or exhaust a shared thread pool; the next call starts a fresh worker.
+In-memory mode (`PERSONA_DB=off`) runs in-process and is tests-only. JSON-RPC
+batch arrays are accepted, and malformed messages return an error instead of
+crashing the stdio loop. Both tool families use one `PERSONA_USER_ID` and one
+store, so `memory_observe` is visible to `memory_context`.
 
 See [MCP.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/MCP.md).
 
@@ -190,21 +197,27 @@ benchmark. The earlier 12/10 fixture scored 90.0%; it was too easy.
 
 ```text
 method                      recall@3     MRR
-v2 native (no pinned)            2.0%   0.020
+v2 native (query, no pinned)    66.0%   0.707
 v2 native (pinned)               2.0%   0.020
 v1 string                       61.0%   0.657
 v1 + bge                        73.0%   0.737
+outer lex                       61.0%   0.637
 outer + bge                     74.0%   0.770
 outer + bge + time facet        76.0%   0.760
 ```
 
-The useful comparison is `outer + bge` → `+ time facet`: +2.0 recall but
--0.010 MRR. The time bucket can promote a due item above an equally correct
-semantic item. The larger fixture is the number to quote.
+`v2 native (query)` is the kernel's own lexical channel with no outer layer.
+`pinned` is a stress case: with `k=3` and forty pinned rows, the budget is all
+pinned, which is why that row stays at 2.0%. The useful comparison is
+`outer + bge` → `+ time facet`: +2.0 recall but -0.010 MRR. The time bucket can
+promote a due item above an equally correct semantic item. The larger fixture is
+the number to quote; CI gates the deterministic `outer lex` channel at 60%.
 
 ```bash
 python scripts/eval_recall.py
 python scripts/eval_recall.py --no-embed
+# CI gate (deterministic, no embedding model required)
+python scripts/eval_recall.py --no-embed --fail-under 0.60 --gate-method "outer lex"
 ```
 
 ### LongMemEval temporal-reasoning subset
@@ -244,9 +257,10 @@ The routine/vector research note is
 | short-term intentions with importance / TTL / anti-nag | shipped |
 | conservative write-time dedup | shipped |
 | `MergedMemory` facade + MCP tools | shipped |
-| episodes + retrospective search | shipped (1.6.3) |
-| weekly routines + in-turn probes | shipped (1.6.3) |
+| episodes + retrospective search | shipped (1.6.5) |
+| weekly routines + in-turn probes | shipped (1.6.5) |
 | v1 → v2 migration script | shipped; dry-run by default |
+| CI: tests on Windows/Linux + recall gate | shipped |
 | graph memory | experimental, not wired into default retrieval |
 | `PersonaManager` default path switched to merged | not yet (M3) |
 
@@ -254,7 +268,7 @@ Known limits:
 
 - single user; no multi-tenant or auth;
 - no UI, persona, or proactive messaging;
-- dedup is lexical and conservative; a low-overlap paraphrase can still create a second record;
+- dedup is lexical and conservative; numbers/months must match, and a low-overlap paraphrase can still create a second record;
 - 50 queries are still a small evaluation set;
 - routines are weekly fields, not a full RFC 5545 RRULE parser yet;
 - episode retrieval falls back to lexical/time when Chroma is unavailable; Chroma requires an embedding function

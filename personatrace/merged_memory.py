@@ -23,13 +23,13 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .episodes import EpisodeStore, has_retrospective
+from .episodes import DEFAULT_EPISODE_TTL_DAYS, EpisodeStore, has_retrospective
 from .facet import has_time_intent, humanize_due, render_time_line, time_bucket
 from .intentions import IntentStore
 from .routines import RoutineStore
 from .recall import rank
 from .schema import (
-    ALL_CATEGORIES, DEFAULT_TZ, STABILITY_DAYS, BeliefIn, coerce_in,
+    ALL_CATEGORIES, DEFAULT_TZ, BeliefIn, coerce_in,
     due_for_write, parse_due, track_for,
 )
 from .structured import call_structured
@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 WRITE_SOURCES = frozenset({"direct", "bridge", "console"})
 DEFAULT_TTL_S = 86400
 DEFAULT_LEAD_S = 2 * 86400
+_VEC_CACHE_LIMIT = 2048
 
 
 def _zone(tz: str):
@@ -61,7 +62,12 @@ def _aware(now: Optional[datetime], tz: str) -> datetime:
 # MemoryV2; this catches only near-identical paraphrases. It is lexical on
 # purpose: it must work without an embedding model and it must not collapse
 # two different commitments that happen to share a verb.
-_DEDUP_THRESHOLD = 0.86
+_DEDUP_THRESHOLD = 0.96
+# Short Chinese labels are only a few edits apart: "计划明年三月去日本东京旅行"
+# and "…四月…" have SequenceMatcher 0.923. Require near-identity while labels
+# are short; numeric/month signatures below are an additional hard stop.
+_DEDUP_SHORT_THRESHOLD = 0.96
+_DEDUP_SHORT_CHARS = 24
 _DEDUP_SYNONYMS = (
     ("偏好", "喜欢"),
     ("比较", ""),
@@ -87,6 +93,45 @@ def _label_similarity(a: str, b: str) -> float:
     if left == right:
         return 1.0
     return SequenceMatcher(None, left, right).ratio()
+
+
+def _dedup_threshold(a: str, b: str) -> float:
+    """Use a stricter threshold when one character is a large fraction of the label."""
+    length = min(len(_normalize_label(a)), len(_normalize_label(b)))
+    return _DEDUP_SHORT_THRESHOLD if length <= _DEDUP_SHORT_CHARS else _DEDUP_THRESHOLD
+
+
+_NUMERIC_RE = re.compile(
+    r"\d+|"
+    r"[零〇一二三四五六七八九十百千万亿两]+"
+    r"(?=月|日|号|点|年|天|周|个|元|块|万|千|百|岁|人|次|小时|分钟|时)"
+)
+
+
+def _numeric_signature(text: str) -> tuple:
+    """Numbers, months and quantities are identity-bearing, not paraphrase."""
+    return tuple(_NUMERIC_RE.findall(_normalize_label(text)))
+
+
+def _numbers_differ(a: str, b: str) -> bool:
+    return _numeric_signature(a) != _numeric_signature(b)
+
+
+_STOPWORD_CHARS = set("的了是在和与及就都也又很我的你他她它这那个些")
+
+
+def _has_content_substitution(a: str, b: str) -> bool:
+    """Reject one-character content swaps such as a proper noun or city name."""
+    left, right = _normalize_label(a), _normalize_label(b)
+    if not left or not right:
+        return False
+    matcher = SequenceMatcher(None, left, right)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "replace" or (i2 - i1) != 1 or (j2 - j1) != 1:
+            continue
+        if left[i1] not in _STOPWORD_CHARS and right[j1] not in _STOPWORD_CHARS:
+            return True
+    return False
 
 
 def _time_compatible(
@@ -207,29 +252,44 @@ class MergedMemory:
         self.default_ttl_s = max(1, int(default_ttl_s))
         self.write_sources = frozenset(write_sources)
         self.memory = memory or self._build_memory(user_id, redis_url, sqlite_path)
-        # If a local SQLite file is used, keep intentions in the same file by
-        # default: one file for the whole memory, not one file per subsystem.
-        resolved_intents_path = intents_path or (sqlite_path if memory is None else None) or ":memory:"
+        # Keep every subsystem in the same durable file by default. The old
+        # code used sqlite_path only when the caller supplied it explicitly;
+        # MemoryV2's own default (~/.personatrace/memory.db) left intentions,
+        # episodes and routines in :memory:, so a restart kept beliefs but
+        # silently lost everything else.
+        backend = getattr(self.memory, "b", None)
+        backend_path = getattr(backend, "path", None)
+        if not isinstance(backend_path, str) or backend_path == ":memory:":
+            backend_path = None
+        durable_path = sqlite_path or backend_path
+        resolved_intents_path = intents_path or durable_path or ":memory:"
         self.intents = intents or IntentStore(resolved_intents_path, default_tz=self.tz)
-        resolved_episodes_path = episodes_path or (sqlite_path if memory is None else None) or ":memory:"
-        resolved_routines_path = routines_path or (sqlite_path if memory is None else None) or ":memory:"
+        resolved_episodes_path = episodes_path or durable_path or ":memory:"
+        resolved_routines_path = routines_path or durable_path or ":memory:"
         self.episodes = episodes or EpisodeStore(
             resolved_episodes_path, default_tz=self.tz, vector_index=vector_index,
         )
         self.routines = routines or RoutineStore(resolved_routines_path, default_tz=self.tz)
         self._vec_cache: Dict[str, Sequence[float]] = {}
-        # The 17-category stability table is a runtime config, not a kernel
-        # fork. Existing beliefs keep their old stability; new ones get this.
-        from .memory_v2 import CATEGORY_STABILITY
-        CATEGORY_STABILITY.update(STABILITY_DAYS)
 
     @staticmethod
     def _build_memory(user_id: str, redis_url: Optional[str], sqlite_path: Optional[str] = None):
-        from .memory_v2 import MemoryV2, SQLiteBackend
-        if sqlite_path:
-            return MemoryV2(backend=SQLiteBackend(sqlite_path), user_id=user_id)
-        # Remote kernel already defaults to SQLite, then Redis/memory fallback.
-        return MemoryV2(user_id=user_id, db_path=sqlite_path)
+        from .memory_v2 import MemoryV2, build_backend
+
+        # An explicit redis_url opts into Redis; otherwise SQLite is used even
+        # if the redis package happens to be installed.
+        backend, _mode = build_backend(url=redis_url, db_path=sqlite_path)
+        return MemoryV2(backend=backend, user_id=user_id)
+
+    def close(self) -> None:
+        """Release belief, intention, episode and routine connections."""
+        for component in (self.memory, self.intents, self.episodes, self.routines):
+            close = getattr(component, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    logger.debug("component close failed", exc_info=True)
 
     # ---------------------------------------------------------------- write
     def remember(
@@ -326,9 +386,11 @@ class MergedMemory:
             return {"status": "skipped", "reason": "source_not_allowed", "source": source}
         now_dt = _aware(now, self.tz)
 
+        belief_items = list(beliefs or [])
+        intent_items = list(intentions or [])
         valid_beliefs: List[BeliefIn] = []
         invalid_beliefs = 0
-        for raw in beliefs or []:
+        for raw in belief_items:
             item = coerce_in(raw)
             if item is None:
                 invalid_beliefs += 1
@@ -337,7 +399,7 @@ class MergedMemory:
 
         valid_intents: List[IntentIn] = []
         invalid_intents = 0
-        for raw in intentions or []:
+        for raw in intent_items:
             try:
                 valid_intents.append(raw if isinstance(raw, IntentIn) else IntentIn.model_validate(raw))
             except Exception:
@@ -345,21 +407,32 @@ class MergedMemory:
 
         written_beliefs = self._write_beliefs(valid_beliefs, "", now_dt, episode_id=episode_id)
         written_intents = self._write_intentions(valid_intents, "", now_dt)
+        belief_ids = [item.id for item in written_beliefs]
+        intent_ids = [item.id for item in written_intents]
         if episode_id and (written_beliefs or written_intents):
             self.episodes.link(
                 episode_id,
-                belief_ids=[item.id for item in written_beliefs],
-                intention_ids=[item.id for item in written_intents],
+                belief_ids=belief_ids,
+                intention_ids=intent_ids,
             )
         return {
             "episode_id": episode_id,
             "status": "success" if (written_beliefs or written_intents) else "no_change",
+            "requested_beliefs": len(belief_items),
+            "requested_intentions": len(intent_items),
             "beliefs": len(written_beliefs),
             "intentions": len(written_intents),
+            # A paraphrase can reinforce the same record twice; make the
+            # difference between "observations applied" and "rows written"
+            # explicit instead of silently implying N distinct rows.
+            "distinct_beliefs": len(set(belief_ids)),
+            "distinct_intentions": len(set(intent_ids)),
+            "dropped_beliefs": 0,
+            "dropped_intentions": 0,
             "invalid_beliefs": invalid_beliefs,
             "invalid_intentions": invalid_intents,
-            "belief_ids": [item.id for item in written_beliefs],
-            "intent_ids": [item.id for item in written_intents],
+            "belief_ids": belief_ids,
+            "intent_ids": intent_ids,
         }
 
     def agenda(self, *, now: Optional[datetime] = None, max_lines: int = 6) -> Dict[str, Any]:
@@ -445,6 +518,18 @@ class MergedMemory:
             self.user_id, query, after=after, before=before, limit=limit,
         )
 
+    def prune_episodes(
+        self,
+        *,
+        max_age_days: float = DEFAULT_EPISODE_TTL_DAYS,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """Explicit retention sweep; no background scheduler is involved."""
+        return self.episodes.prune(
+            self.user_id, max_age_days=max_age_days,
+            now=_aware(now, self.tz).timestamp(),
+        )
+
     def _extract(self, user_msg: str, reply: str, now: datetime) -> Optional[MemoryExtraction]:
         if self.llm is None:
             return None
@@ -519,7 +604,12 @@ Return JSON only:
                 row.get("due_at_ts"), row.get("time_kind", "none"),
             ):
                 continue
-            if _label_similarity(item.label, row.get("label", "")) >= _DEDUP_THRESHOLD:
+            candidate = row.get("label", "")
+            if _numbers_differ(item.label, candidate):
+                continue
+            if _has_content_substitution(item.label, candidate):
+                continue
+            if _label_similarity(item.label, candidate) >= _dedup_threshold(item.label, candidate):
                 return row
         return None
 
@@ -533,7 +623,7 @@ Return JSON only:
     ) -> List[Any]:
         written = []
         index = self._existing_belief_index(now)
-        for draft in beliefs[:4]:
+        for draft in beliefs:
             item = coerce_in(draft)
             if item is None:
                 continue
@@ -572,7 +662,7 @@ Return JSON only:
 
     def _write_intentions(self, intentions: List[IntentIn], user_msg: str, now: datetime) -> List[Any]:
         written = []
-        for draft in intentions[:4]:
+        for draft in intentions:
             title = (draft.action or "").strip()
             if len(title) < 2:
                 continue
@@ -635,11 +725,19 @@ Return JSON only:
     ) -> ContextPack:
         now_dt = _aware(now, self.tz)
         now_ts = now_dt.timestamp()
-        rows = self.memory.state(as_of=now_ts, expand=1)
+        # Rank on the index layer first; evidence/reasoning is loaded only for
+        # the rows that survive pinned/shown/cross selection. Expanding every
+        # belief here turned a 1k-belief context into 1k L0 reads.
+        rows = self.memory.state(as_of=now_ts, expand=0)
         query_vec, vectors = self._embed_for(query, rows)
         ranked = rank(
             rows, query, query_vec=query_vec, vectors=vectors, k=k,
         )
+        enrich = getattr(self.memory, "enrich", None)
+        if callable(enrich):
+            ranked["pinned"] = enrich(ranked["pinned"], expand=1)
+            ranked["shown"] = enrich(ranked["shown"], expand=1)
+            ranked["cross"] = enrich(ranked["cross"], expand=1)
         dated = time_bucket(rows, now=now_dt, tz=self.tz) if has_time_intent(query) else []
         agenda_lines: List[str] = []
         try:
@@ -756,6 +854,9 @@ Return JSON only:
                 vectors = self.embed_fn(missing)
                 for text, vector in zip(missing, vectors):
                     self._vec_cache[text] = vector
+                if len(self._vec_cache) > _VEC_CACHE_LIMIT:
+                    for stale in list(self._vec_cache)[: len(self._vec_cache) - _VEC_CACHE_LIMIT]:
+                        self._vec_cache.pop(stale, None)
             query_vec = self._vec_cache.get(query)
             vectors = {
                 str(row.get("id")): self._vec_cache[str(row.get("label", ""))]

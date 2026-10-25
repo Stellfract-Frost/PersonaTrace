@@ -46,6 +46,16 @@ def test_retrospective_markers():
     assert has_retrospective("What did we discuss last time?")
     assert not has_retrospective("明天有什么安排")
 
+
+def test_retrospective_markers_do_not_fire_on_ordinary_words():
+    assert not has_retrospective("How do I order a pizza?")
+    assert not has_retrospective("Tell me about Chicago")
+    assert not has_retrospective("What's my first task?")
+    assert not has_retrospective("I live before the station")
+    assert not has_retrospective("The border is blue")
+    assert has_retrospective("How many days ago did I move?")
+    assert has_retrospective("What did I do before the trip?")
+
 class FakeVectorIndex:
     def __init__(self):
         self.rows = {}
@@ -89,6 +99,42 @@ def test_vector_index_is_optional_and_falls_back():
 
     store.delete(first.id)
     assert first.id in index.deleted
+
+
+def test_prune_uses_the_retention_window():
+    store = EpisodeStore(":memory:", default_tz=TZ)
+    old = store.add("u", "old turn", ts=NOW.timestamp() - 100 * 86400)
+    new = store.add("u", "new turn", ts=NOW.timestamp() - 10 * 86400)
+    assert old and new
+    assert store.prune("u", max_age_days=90, now=NOW) == 1
+    assert [ep.id for ep in store.recent("u")] == [new.id]
+
+
+def test_search_reaches_episodes_older_than_500():
+    store = EpisodeStore(":memory:", default_tz=TZ)
+    base = NOW.timestamp()
+    first = store.add("u", "needleword lives in the oldest turn", ts=base - 10_000)
+    assert first is not None
+    for index in range(600):
+        store.add("u", f"haystack turn {index}", ts=base + index)
+
+    hits = store.search("u", "needleword", limit=3)
+    assert hits and hits[0]["id"] == first.id
+
+
+def test_vector_hit_outside_recent_500_is_fetched_by_id():
+    index = FakeVectorIndex()
+    store = EpisodeStore(":memory:", default_tz=TZ, vector_index=index)
+    base = NOW.timestamp()
+    older = store.add("u", "vector-only early turn", ts=base - 10_000)
+    assert older is not None
+    for i in range(600):
+        store.add("u", f"newer turn {i}", ts=base + i)
+
+    # Keep only the old id in the vector index; lexical candidates are newer.
+    index.rows = {older.id: older}
+    hits = store.search("u", "something nobody wrote lexically", limit=3)
+    assert hits and hits[0]["id"] == older.id
 
 
 def test_chroma_episode_index_if_available(tmp_path):

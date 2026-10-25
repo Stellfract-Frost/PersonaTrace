@@ -54,11 +54,17 @@ API key, or network is required. Set `PERSONA_DB` to another path to move it;
 ### Fields that matter
 
 - `retention`: how much of the belief is still fresh. `R = exp(-t/S)`.
+- `as_of` / `known_as_of`: valid time and transaction time. With only `as_of`,
+  the result is a true snapshot of what was known then.
 - `staleness`: time since support / stability. Above 1 means more than half a
   shelf life has passed.
 - `due_in`: days until due (negative = overdue). This is the planning field.
 - `time_kind` / `time_raw`: typed time (`due / past / range / recurring`) and the
-  original expression.
+  original expression. On `memory_observe`, omitting these fields preserves the
+  old value; passing `null` / `"none"` / `""` clears it.
+- `revive`: `memory_observe` reopens a corrected belief by default when the new
+  observation is at or after its invalidation time; pass `false` to keep it
+  closed.
 - `hidden`: how many related items were squeezed out by the budget.
 - `agenda_lines`: short-term intentions; `[需主动]` marks the one item whose
   time bucket changed and may be raised proactively.
@@ -92,13 +98,24 @@ produce no response.
 |---|---|
 | Core protocol has no SDK dependency | stdlib JSON-RPC loop |
 | Merged tools are optional | lazy `MergedMemory` import; Pydantic + SQLite |
-| Failure does not take the host down | 8s timeout per call; exceptions become `isError` results |
+| Failure does not take the host down | one isolated worker process, 8s deadline, kill on expiry; exceptions become `isError` results |
+| Batch-safe | JSON-RPC arrays are processed one by one; malformed/non-object messages return an error |
+| Wire is UTF-8 | stdin/stdout are reconfigured explicitly, independent of the host locale |
+| Internal errors stay internal | generic `-32603` on the wire; traceback goes to stderr |
+| One user namespace | both tool families use `PERSONA_USER_ID` and the same store |
 | No conversation pollution | tools return structured data; no prompt mutation |
 | No scope creep | no proactive messaging, no persona, no UI |
 
-The old five tools (`state / recall / observe / correct / predict`) still work
-against `MemoryV2`. The merged tools use `MergedMemory` and share one SQLite
-file for beliefs, intentions, episodes and routines.
+The old five tools (`state / recall / observe / correct / predict`) and the
+merged tools now resolve to the same `MemoryV2` instance/namespace. The merged
+tools add intentions, episodes and routines in the same SQLite file.
+
+`as_of` is snapshot time by default: it selects what was known at that moment.
+Pass `known_as_of` (for example, now) to ask what the current store knows about
+a historical date.
+
+In-memory mode (`PERSONA_DB=off`) runs in-process because a child process cannot
+share it; durable mode uses the isolated worker and a real deadline.
 
 ## 5. Tests
 
@@ -110,3 +127,6 @@ python -m pytest test_memory_v2.py -q
 `test_stdio_end_to_end` starts a real subprocess and walks
 `initialize → tools/list → observe → state`. The merged tests cover
 `remember → context → agenda` through both the handler and a subprocess.
+`test_worker_timeout_is_real_and_restartable` proves a sleeping tool is killed
+at the deadline and the next call starts a fresh worker; the batch tests send a
+JSON array through stdin and assert the process still exits 0.
