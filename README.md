@@ -15,6 +15,16 @@ it has a validity window, a retention curve, evidence, and optionally a due
 date. A separate intention store handles one-off commitments whose lifetime is
 measured in hours or days, not in months.
 
+## Two goals, one repo
+
+This project has two goals. The first is a lightweight memory kernel that stays
+inspectable — one SQLite file, no write-time LLM calls, no graph database.
+
+The second is to write down what actually went wrong while building it. Every
+budget, fusion rule and state transition here was paid for with a failed run,
+and most of those failures were not obvious from the code. They are recorded in
+[docs/PITFALLS.md](docs/PITFALLS.md) so the next person does not pay for them again.
+
 ## What it remembers
 
 | Type | Examples | Lifetime |
@@ -192,48 +202,39 @@ See [MCP.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/MCP
 
 ## Evaluation
 
-A 200-belief, 50-query fixture is included. It is a directional gate, not a
-benchmark. The earlier 12/10 fixture scored 90.0%; it was too easy.
+### LongMemEval_s: 500 questions
+
+Primary external result for the merged episode layer. The answerer and judge are
+both `deepseek-flash` at temperature 0. This is not a GPT-4o number.
+
+| Question type | Questions | Correct | Accuracy | tok/question |
+|---|---:|---:|---:|---:|
+| single-session-assistant | 56 | 55 | 98.2% | 21,591 |
+| single-session-user | 70 | 67 | 95.7% | 6,367 |
+| temporal-reasoning | 133 | 119 | 89.5% | 6,901 |
+| knowledge-update | 78 | 67 | 85.9% | 6,426 |
+| multi-session | 133 | 105 | 78.9% | 7,116 |
+| single-session-preference | 30 | 18 | 60.0% | 25,022 |
+| **total** | **500** | **431** | **86.2%** | **8,467** |
 
 ```text
-method                      recall@3     MRR
-v2 native (query, no pinned)    66.0%   0.707
-v2 native (pinned)              52.0%   0.290
-outer lex                       61.0%   0.637
-outer + bge                     74.0%   0.770
-outer + bge + time facet        76.0%   0.760
+LLM self-judge            86.2%  (431/500)
+rule-judge lower bound    78.4%
+cost                      about ¥5.50
+temporal subset           89.5%  (119/133)
 ```
 
-`v2 native (query)` is the kernel's own lexical channel with no outer layer.
-`pinned` is capped at half the budget (`max(1, k // 2)`), so constraints and
-boundaries cannot consume the whole query budget. The useful comparison is
-`outer + bge` → `+ time facet`: +2.0 recall but -0.010 MRR. The time bucket can
-promote a due item above an equally correct semantic item. The larger fixture is
-the number to quote; CI gates the deterministic `outer lex` channel at 60%.
+The result file is `data/lme_500_final.json`. Details, configuration and the
+hook note are in [docs/LONGMEMEVAL.md](docs/LONGMEMEVAL.md).
+
+### Local regression fixture
+
+The 200-belief / 50-query fixture is a deterministic CI gate, not a benchmark.
+It is intentionally kept out of the main result: [docs/LOCAL_EVAL.md](docs/LOCAL_EVAL.md).
 
 ```bash
-python scripts/eval_recall.py
-python scripts/eval_recall.py --no-embed
-# CI gate (deterministic, no embedding model required)
 python scripts/eval_recall.py --no-embed --fail-under 0.60 --gate-method "outer lex"
 ```
-
-### LongMemEval temporal-reasoning subset
-
-First external run, not the full benchmark and not GPT-4o:
-
-```text
-133 questions (temporal-reasoning)     101 correct   75.9%
-20 questions (first run)                 17 correct   85.0%
-20 questions (timed run)                 16 correct   80.0%
-retrieval hybrid+rerank (133)           recall@3 86.8%, MRR 0.935
-build 32,930 episodes                   1,259.9 s; reuse 2.5 s
-```
-
-Answerer and judge are both `deepseek-flash` at temperature 0, so self-judge
-bias applies. The bilingual episode hook opens on 132/133 questions (20/20 on
-the smoke set). The merged-context gate and the retrieval numbers are explained
-in [LONGMEMEVAL.md](https://github.com/Stellfract-Frost/PersonaTrace/blob/main/docs/LONGMEMEVAL.md).
 
 ## Design notes
 
@@ -258,8 +259,9 @@ the v1 → 2.x import/behavior changes are in
 | short-term intentions with importance / TTL / anti-nag | shipped |
 | conservative write-time dedup | shipped |
 | `MergedMemory` facade + MCP tools | shipped |
-| episodes + retrospective search | shipped (1.6.5) |
-| weekly routines + in-turn probes | shipped (1.6.5) |
+| episodes + retrospective search | shipped |
+| optional cross-encoder reranking inside `episodes_search` | shipped |
+| weekly routines + in-turn probes | shipped |
 | v1 → v2 migration script | shipped; dry-run by default |
 | runtime v1 pipeline | removed in 2.0; migration shim only |
 | CI: tests on Windows/Linux + recall gate | shipped |
@@ -269,9 +271,9 @@ Known limits:
 - single user; no multi-tenant or auth;
 - no UI, persona, or proactive messaging;
 - dedup is lexical and conservative; numbers/months must match, and a low-overlap paraphrase can still create a second record;
-- 50 queries are still a small evaluation set;
+- the 50-query local fixture is a CI gate, not a benchmark; LongMemEval is the external result;
 - routines are weekly fields, not a full RFC 5545 RRULE parser yet;
-- episode retrieval falls back to lexical/time when Chroma is unavailable; Chroma requires an embedding function
+- episode retrieval falls back to lexical/time when Chroma is unavailable; Chroma requires an embedding function.
 - routine probes are hints; the host must ask and must report feedback;
 - there is no background scheduler and no automatic proactive message;
 - old Chroma profiles must be migrated with `scripts/migrate_v1.py`; the

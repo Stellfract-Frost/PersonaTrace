@@ -530,7 +530,12 @@ class IntentStore:
         user_id: str,
         *,
         statuses: Optional[Iterable[str]] = None,
+        sweep: bool = False,
     ) -> List[Intent]:
+        if sweep:
+            # Keep the stored status honest before reading it back, so callers
+            # that filter on "active" do not get rows that are weeks past due.
+            self.sweep(user_id)
         allowed = tuple(statuses) if statuses else None
         if allowed:
             placeholders = ",".join("?" for _ in allowed)
@@ -546,6 +551,36 @@ class IntentStore:
                 (user_id,),
             ).fetchall()
         return [Intent.from_row(row) for row in rows]
+
+    def sweep(self, user_id: str, *, now: Any = None) -> int:
+        """Close intentions whose grace window has already passed.
+
+        ``_dynamic_status`` has always computed ``expired`` for display, but
+        nothing wrote it back to the row, so ``list(statuses=("active",))`` kept
+        returning a commitment that was weeks overdue and any count built on the
+        stored status was inflated. Recurring series are skipped: their due date
+        moves per occurrence and the series must not be closed as a whole.
+        """
+        now_ts = _to_epoch(now, self.default_tz) if now is not None else time.time()
+        now_ts = float(now_ts if now_ts is not None else time.time())
+        closed = 0
+        with self._lock:
+            for row in self.list(user_id, statuses=OPEN_STATUSES):
+                if row.status == "proposed" or row.due_at is None:
+                    continue
+                if (row.rrule or "").strip():
+                    continue
+                if self._dynamic_status(row, row.due_at, now_ts) != "expired":
+                    continue
+                cur = self.conn.execute(
+                    "UPDATE intentions SET status='expired', updated_at=? "
+                    "WHERE id=? AND status=?",
+                    (now_ts, row.id, row.status),
+                )
+                closed += max(0, cur.rowcount)
+            if closed:
+                self.conn.commit()
+        return closed
 
     def touch_turn(self, user_id: str, ts: Any = None) -> None:
         value = _to_epoch(ts, self.default_tz) if ts is not None else time.time()
@@ -576,6 +611,7 @@ class IntentStore:
     ) -> Dict[str, Any]:
         now_ts = _to_epoch(now, self.default_tz) if now is not None else time.time()
         now_ts = float(now_ts if now_ts is not None else time.time())
+        self.sweep(user_id, now=now_ts)
         items: List[Dict[str, Any]] = []
         for row in self.list(user_id, statuses=OPEN_STATUSES):
             if row.status == "proposed" and not include_proposed:

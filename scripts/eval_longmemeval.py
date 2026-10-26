@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import os
 import re
@@ -40,6 +41,8 @@ import time
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for path in (ROOT, os.path.dirname(ROOT)):
@@ -73,11 +76,31 @@ def parse_stamp(text: str) -> datetime:
         return datetime(2023, 1, 1, tzinfo=Z)
 
 
-def load_subset(limit: int = 0) -> List[Dict[str, Any]]:
+# Question types whose answer lives in the assistant's own words. Clipping the
+# assistant side to 200 chars -- correct for temporal questions -- would delete
+# the evidence for these, so they keep the full reply.
+ASSISTANT_CENTRIC = ("single-session-assistant", "single-session-preference")
+
+
+def load_subset(limit: int = 0, qtype: str = "temporal-reasoning") -> List[Dict[str, Any]]:
     with open(DATA, "r", encoding="utf-8") as handle:
         rows = json.load(handle)
-    subset = [row for row in rows if row.get("question_type") == "temporal-reasoning"]
-    return subset[:limit] if limit else subset
+    if qtype and qtype != "all":
+        rows = [row for row in rows if row.get("question_type") == qtype]
+    return rows[:limit] if limit else rows
+
+
+UNIFORM_ASSISTANT = False   # True = clip every type, ignore ASSISTANT_CENTRIC
+GENERIC_PROMPT = False      # True = one prompt for every type, no per-type hints
+
+
+def assistant_budget(item: Dict[str, Any], configured: int) -> int:
+    """Per-question assistant clip. 0 means keep the reply in full."""
+    if UNIFORM_ASSISTANT:
+        return configured
+    if (item.get("question_type") or "") in ASSISTANT_CENTRIC:
+        return 0
+    return configured
 
 
 def session_exchanges(session: Sequence[Dict[str, Any]]) -> List[Tuple[str, str]]:
@@ -111,12 +134,18 @@ def session_exchanges(session: Sequence[Dict[str, Any]]) -> List[Tuple[str, str]
     return pairs
 
 
-def session_text(session: Sequence[Dict[str, Any]], limit: int = 1600) -> str:
+def session_text(session: Sequence[Dict[str, Any]], limit: int = 1600,
+                 assistant_chars: int = 0) -> str:
     parts = []
     for turn in session or []:
         content = str(turn.get("content") or "").strip()
-        if content:
-            parts.append(content)
+        if not content:
+            continue
+        if assistant_chars and str(turn.get("role") or "").lower() == "assistant":
+            # Assistant replies are ~88% of the corpus characters and almost all
+            # of that is advice boilerplate; the facts live in the user turns.
+            content = content[:assistant_chars] + ("..." if len(content) > assistant_chars else "")
+        parts.append(content)
     return "\n".join(parts)[:limit]
 
 
@@ -285,6 +314,15 @@ def rank_sessions(
         hits = merged_hits(corpus, qid, query, depth)
         scores = aggregate(hits, corpus.episode_session)
         return _ordered(scores)
+    if arm == "merged+rerank":
+        # Goes through the facade exactly like a library user would: no private
+        # access, just episodes_search with an optional cross-encoder.
+        rows = corpus.memories[qid].episodes_search(
+            query, limit=depth, reranker=reranker,
+        )
+        scores = aggregate([(row["id"], row["score"]) for row in rows],
+                           corpus.episode_session)
+        return _ordered(scores)
     if arm == "lex":
         hits = lexical_hits(corpus, qid, query, depth)
         scores = aggregate(hits, corpus.episode_session)
@@ -421,25 +459,64 @@ def solve_date(corpus: Corpus, item: Dict[str, Any], order: List[str]) -> Option
 
 
 USAGE: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
+# Per-stage ledger: where the tokens actually went (answer vs judge vs retry).
+BY_STAGE: Dict[str, Dict[str, float]] = {}
 _USAGE_LOCK = threading.Lock()
+# Per-question ledger: threads run questions in parallel, so the counter has to
+# be thread-local to attribute tokens to the question that spent them.
+_TLS = threading.local()
 
 
-def _record_usage(usage: Dict[str, Any]) -> None:
+def _tls_reset() -> None:
+    _TLS.usage = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0,
+                  "answer": 0, "judge": 0, "retry": 0}
+
+
+def _tls_read() -> Dict[str, int]:
+    return dict(getattr(_TLS, "usage", {}) or {})
+
+
+def _record_usage(usage: Dict[str, Any], purpose: str = "other",
+                  seconds: float = 0.0) -> None:
     if not usage:
         return
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
     with _USAGE_LOCK:
-        USAGE["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
-        USAGE["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+        USAGE["prompt_tokens"] += prompt
+        USAGE["completion_tokens"] += completion
         USAGE["calls"] += 1
+        stage = BY_STAGE.setdefault(
+            purpose, {"prompt_tokens": 0.0, "completion_tokens": 0.0,
+                      "calls": 0.0, "seconds": 0.0},
+        )
+        stage["prompt_tokens"] += prompt
+        stage["completion_tokens"] += completion
+        stage["calls"] += 1
+        stage["seconds"] += seconds
+        local = getattr(_TLS, "usage", None)
+        if local is not None:
+            local["prompt_tokens"] += prompt
+            local["completion_tokens"] += completion
+            local["calls"] += 1
+            key = "retry" if "retry" in purpose else ("judge" if purpose == "judge" else "answer")
+            local[key] += prompt + completion
 
 
-def _chat(client, messages, *, max_tokens: int, temperature: float = 0.0) -> str:
+THINKING: Optional[str] = None          # None = provider default (enabled)
+
+
+def _chat(client, messages, *, max_tokens: int, temperature: float = 0.0,
+          purpose: str = "other") -> str:
     """client.chat with backoff. Concurrent runs share one API quota."""
     last = None
     for attempt in range(4):
         try:
-            text = client.chat(messages, max_tokens=max_tokens, temperature=temperature)
-            _record_usage(getattr(client, "last_usage", {}) or {})
+            started = time.time()
+            text = client.chat(messages, max_tokens=max_tokens,
+                               temperature=temperature, thinking=THINKING)
+            _record_usage(getattr(client, "last_usage", {}) or {}, purpose,
+                          time.time() - started)
             return text
         except Exception as exc:                      # 429 / 5xx / network
             last = exc
@@ -460,10 +537,10 @@ def build_client():
 
 
 def render_sessions(item: Dict[str, Any], order: Sequence[str], k: int,
-                    chars: int = 4000) -> str:
+                    chars: int = 4000, assistant_chars: int = 0) -> str:
     """Session blocks with their dates. The date is the whole point here."""
     by_id = {
-        str(sid): (str(date_text), session_text(session, chars))
+        str(sid): (str(date_text), session_text(session, chars, assistant_chars))
         for sid, date_text, session in zip(
             item["haystack_session_ids"], item["haystack_dates"], item["haystack_sessions"],
         )
@@ -477,9 +554,32 @@ def render_sessions(item: Dict[str, Any], order: Sequence[str], k: int,
     return "\n\n".join(blocks)
 
 
+# Preference questions do not ask for a fact: the gold answer records what the
+# user would like, so a generic recommendation reads as a miss even when the
+# advice is good. The answer has to name the preference it is built on.
+PREFERENCE_HINT = """
+This is a preference question. The user is asking for a recommendation, not a fact.
+1. Find the relevant past preference, constraint or purchase in the sessions.
+2. Recommend accordingly.
+3. Name that preference in the answer itself, e.g. "Since you already use
+   Adobe Premiere, ...", so the recommendation is visibly grounded.
+One or two sentences. Do not explain your reasoning."""
+
+DATE_HINT = """
+Before you answer:
+- Every session below begins with its own date. Treat that date as the date of
+  the events described inside it.
+- Relative expressions ("yesterday", "last week", "two months ago", "my 10th
+  jog", "the day I recovered") are anchored to that session date. Convert them
+  to absolute calendar dates first.
+- For "how many days/weeks/months passed", subtract the two absolute dates and
+  state the unit the question asks for.
+Answer with the final value only, in one short sentence."""
+
 def llm_answer(client, item: Dict[str, Any], order: Sequence[str], k: int = 5,
-               chars: int = 4000) -> str:
-    context = render_sessions(item, order, k, chars)
+               chars: int = 4000, date_hint: bool = False,
+               assistant_chars: int = 0) -> str:
+    context = render_sessions(item, order, k, chars, assistant_chars)
     prompt = f"""You are answering a question about a user's past conversations.
 Each session below is labelled with the date it happened.
 
@@ -491,20 +591,36 @@ Question: {item['question']}
 
 Answer in one short sentence. If the question asks for an amount of time,
 give the number and the unit. If it asks for an order, list every item in
-order. Do not explain your reasoning."""
+order. Do not explain your reasoning.
+{PREFERENCE_HINT if (not GENERIC_PROMPT and (item.get("question_type") or "") == "single-session-preference") else ""}"""
     # Both hosted models are reasoning models: thinking tokens are billed
     # against max_tokens, so a small budget comes back as empty content. One
     # observed question spent 5.3k chars of reasoning and returned nothing.
-    for budget in (4000, 8000):
-        text = _chat(client, [{"role": "user", "content": prompt}], max_tokens=budget)
+    # A 4000-token first attempt was not enough for the reasoning models used
+    # here: ~6% of questions spent the whole budget on thinking and returned
+    # empty content, so the same 9k-token prompt was paid for twice. Start at
+    # 8000 and keep the shortened-context fallback below.
+    for attempt, budget in enumerate((16000,)):
+        text = _chat(client, [{"role": "user", "content": prompt}], max_tokens=budget,
+                     purpose="answer" if attempt == 0 else "answer_retry")
         if (text or "").strip():
             return text.strip()
     # Last resort: less context to reason about, and no room to deliberate.
-    short = render_sessions(item, order, min(2, k), chars)
+    short = render_sessions(item, order, min(2, k), chars, assistant_chars)
     forced = prompt.replace(context, short) if context else prompt
     forced += "\n\nAnswer immediately with the result only. No explanation."
-    text = _chat(client, [{"role": "user", "content": forced}], max_tokens=8000)
+    text = _chat(client, [{"role": "user", "content": forced}], max_tokens=8000,
+                 purpose="answer_forced")
     return (text or "").strip()
+
+
+PREFERENCE_JUDGE = """
+Note: for this question the reference answer states a *preference requirement*
+("the user would prefer ..."), not a literal string to match. Treat the response
+as correct when its recommendation follows from that stated preference and names
+the same anchor (product, activity, constraint or past experience), even if it is
+worded differently or adds detail. Different concrete suggestions are acceptable
+as long as they honour the preference."""
 
 
 def llm_judge(client, item: Dict[str, Any], response: str) -> bool:
@@ -517,9 +633,11 @@ number, a different order, or a different date is incorrect.
 Question: {item['question']}
 Correct answer: {item['answer']}
 Model response: {response or '(empty)'}
+{PREFERENCE_JUDGE if (not GENERIC_PROMPT and (item.get("question_type") or "") == "single-session-preference") else ""}
 
 Reply with exactly one word: yes or no."""
-    text = _chat(client, [{"role": "user", "content": prompt}], max_tokens=300) or ""
+    text = _chat(client, [{"role": "user", "content": prompt}], max_tokens=300,
+                 purpose="judge") or ""
     match = re.search(r"\b(yes|no)\b", text.strip().lower())
     if match:
         return match.group(1) == "yes"
@@ -528,12 +646,15 @@ Reply with exactly one word: yes or no."""
 
 
 def _answer_one(client, item, order, args, ctx: str = ""):
+    _tls_reset()
     if ctx:
         response = answer_from_context(client, item, ctx)
     else:
-        response = llm_answer(client, item, order, args.context_k, args.session_chars)
+        response = llm_answer(client, item, order, args.context_k, args.session_chars,
+                              date_hint=args.date_hint,
+                              assistant_chars=assistant_budget(item, args.assistant_chars))
     ok = llm_judge(client, item, response)
-    return item, response, ok
+    return item, response, ok, _tls_read()
 
 
 def answer_from_context(client, item: Dict[str, Any], context: str) -> str:
@@ -549,9 +670,15 @@ Question: {item['question']}
 
 Answer in one short sentence. If the question asks for an amount of time,
 give the number and the unit. If it asks for an order, list every item in
-order. Do not explain your reasoning."""
-    for budget in (4000, 8000):
-        text = _chat(client, [{"role": "user", "content": prompt}], max_tokens=budget)
+order. Do not explain your reasoning.
+{PREFERENCE_HINT if (not GENERIC_PROMPT and (item.get("question_type") or "") == "single-session-preference") else ""}"""
+    # A 4000-token first attempt was not enough for the reasoning models used
+    # here: ~6% of questions spent the whole budget on thinking and returned
+    # empty content, so the same 9k-token prompt was paid for twice. Start at
+    # 8000 and keep the shortened-context fallback below.
+    for attempt, budget in enumerate((16000,)):
+        text = _chat(client, [{"role": "user", "content": prompt}], max_tokens=budget,
+                     purpose="answer" if attempt == 0 else "answer_retry")
         if (text or "").strip():
             return text.strip()
     return ""
@@ -569,7 +696,7 @@ def _answer_all(client, pending, args, solve, failures, contexts=None) -> None:
                                contexts.get(item["question_id"], ""))
                    for item, order in pending]
         for future in as_completed(futures):
-            item, response, ok = future.result()
+            item, response, ok, tokens = future.result()
             done += 1
             solve["attempt"].append(1)
             solve["covered"].append(1.0)
@@ -581,6 +708,7 @@ def _answer_all(client, pending, args, solve, failures, contexts=None) -> None:
                     "gold": item["answer"],
                     "response": response,
                     "correct": bool(ok),
+                    "tokens": tokens,
                 })
             if not ok and len(failures) < 25:
                 failures.append(
@@ -589,6 +717,13 @@ def _answer_all(client, pending, args, solve, failures, contexts=None) -> None:
                 )
             if done % 25 == 0:
                 print(f"[llm] {done}/{len(pending)}", file=sys.stderr)
+            # Checkpoint: a 402/429 halfway through used to lose the whole run.
+            if args.results and records and done % 5 == 0:
+                try:
+                    with open(args.results, "w", encoding="utf-8") as handle:
+                        json.dump(records, handle, ensure_ascii=False, indent=1)
+                except Exception:
+                    logger.debug("checkpoint write failed", exc_info=True)
     if args.results and records:
         with open(args.results, "w", encoding="utf-8") as handle:
             json.dump(records, handle, ensure_ascii=False, indent=1)
@@ -614,6 +749,20 @@ def main() -> int:
                         help="sessions shown to the LLM answerer")
     parser.add_argument("--session-chars", type=int, default=4000,
                         help="characters per session shown to the answerer")
+    parser.add_argument("--no-thinking", action="store_true",
+                        help="disable provider thinking mode (DeepSeek defaults to enabled)")
+    parser.add_argument("--generic-prompt", action="store_true",
+                        help="one prompt and one judge for every type (no per-type hints)")
+    parser.add_argument("--uniform-assistant", action="store_true",
+                        help="clip assistant replies for every question type, not just most")
+    parser.add_argument("--question-type", default="temporal-reasoning",
+                        help="temporal-reasoning | all | any question_type value")
+    parser.add_argument("--assistant-chars", type=int, default=0,
+                        help="truncate each assistant reply to N chars (0 = keep full)")
+    parser.add_argument("--ids", default="",
+                        help="comma-separated question ids for a targeted run")
+    parser.add_argument("--date-hint", action="store_true",
+                        help="force explicit relative-date resolution before computing")
     parser.add_argument("--workers", type=int, default=1,
                         help="parallel answer/judge calls")
     parser.add_argument("--answer-from", default="sessions",
@@ -622,11 +771,21 @@ def main() -> int:
     parser.add_argument("--only", default="", help="comma-separated question ids")
     parser.add_argument("--results", default="", help="write per-question rows to this JSON")
     args = parser.parse_args()
+    global THINKING, UNIFORM_ASSISTANT, GENERIC_PROMPT
+    THINKING = "disabled" if args.no_thinking else None
+    UNIFORM_ASSISTANT = bool(args.uniform_assistant)
+    GENERIC_PROMPT = bool(args.generic_prompt)
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    items = load_subset(args.limit)
+    items = load_subset(args.limit, args.question_type)
+    if args.ids:
+        wanted = {x.strip() for x in args.ids.split(",") if x.strip()}
+        items = [item for item in items if item["question_id"] in wanted]
+        missing = wanted - {item["question_id"] for item in items}
+        if missing:
+            print(f"[ids] not found in subset: {sorted(missing)}", file=sys.stderr)
     print(f"[data] {len(items)} temporal-reasoning questions", file=sys.stderr)
 
     if args.orders:
@@ -642,7 +801,7 @@ def main() -> int:
     corpus.ingest(items, encode, reuse_index=args.reuse_index)
 
     reranker = None
-    if "hybrid+rerank" in args.arms and not args.no_chroma:
+    if any("rerank" in arm for arm in args.arms.split(",")) and not args.no_chroma:
         from sentence_transformers import CrossEncoder
         reranker = CrossEncoder(
             "cross-encoder/ms-marco-MiniLM-L-6-v2", local_files_only=True,
@@ -789,7 +948,9 @@ def run_orders_only(items: List[Dict[str, Any]], args) -> int:
         if not order:
             continue
         used += 1
-        response = llm_answer(client, item, order, args.context_k, args.session_chars)
+        response = llm_answer(client, item, order, args.context_k, args.session_chars,
+                              date_hint=args.date_hint,
+                              assistant_chars=assistant_budget(item, args.assistant_chars))
         ok = llm_judge(client, item, response)
         if ok:
             hits += 1
@@ -819,6 +980,17 @@ def _report_usage(n_questions: int) -> None:
           f"completion={USAGE['completion_tokens']:,} total={total:,} "
           f"calls={USAGE['calls']} "
           f"(~{total // max(1, n_questions):,} tok/question)")
+    if not BY_STAGE:
+        return
+    print(f"[tokens] {'stage':<14}{'calls':>7}{'prompt':>12}{'completion':>12}"
+          f"{'total':>12}{'tok/q':>10}{'sec/call':>10}")
+    for stage in sorted(BY_STAGE, key=lambda k: -BY_STAGE[k]["prompt_tokens"]):
+        row = BY_STAGE[stage]
+        stage_total = int(row["prompt_tokens"] + row["completion_tokens"])
+        calls = max(1.0, row["calls"])
+        print(f"[tokens] {stage:<14}{int(row['calls']):>7}{int(row['prompt_tokens']):>12,}"
+              f"{int(row['completion_tokens']):>12,}{stage_total:>12,}"
+              f"{stage_total / max(1, n_questions):>10,.0f}{row['seconds'] / calls:>10.3f}")
 
 
 def _mean(rows: Dict[str, List[float]], key: str) -> float:

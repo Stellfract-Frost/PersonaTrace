@@ -256,8 +256,20 @@ def _typed(day: date, clock: Optional[datetime], now: datetime, raw: str,
     )
 
 
-_EN_WEEKDAYS = {
-    "monday": 0, "mon": 0,
+def _at(moment: datetime, raw: str, now: datetime) -> TypedTime:
+    """A time slot with sub-day precision ("in 2 hours", "两小时后").
+
+    ``_typed`` always starts from a date and an optional clock, which cannot
+    express an offset of a few hours. This keeps the same kind contract.
+    """
+    at = moment.timestamp()
+    return TypedTime(
+        kind="past" if at < now.timestamp() else "due",
+        raw=raw, at=at, confidence=1.0,
+    )
+
+
+_EN_WEEKDAYS = {    "monday": 0, "mon": 0,
     "tuesday": 1, "tue": 1, "tues": 1,
     "wednesday": 2, "wed": 2,
     "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
@@ -329,7 +341,7 @@ def _parse_english_due(raw: str, now: datetime, tz: str) -> Optional[TypedTime]:
     if re.search(r"\blast night\b", text):
         return make(now.date() - timedelta(days=1), force_past=True)
 
-    match = re.search(r"\bin\s+([a-z]+|\d+)\s+(day|week|month|year)s?\b", text)
+    match = re.search(r"\b(?:in|after)\s+([a-z]+|\d+)\s+(day|week|month|year)s?\b", text)
     if match:
         count = _en_number(match.group(1))
         if count is None:
@@ -343,21 +355,41 @@ def _parse_english_due(raw: str, now: datetime, tz: str) -> Optional[TypedTime]:
             return make(_add_months(now.date(), count))
         return make(_add_months(now.date(), 12 * count))
 
-    match = re.search(r"\b([a-z]+|\d+)\s+(day|week|month|year)s?\s+(?:ago|from now)\b", text)
+    match = re.search(r"\b([a-z]+|\d+)\s+(day|week|month|year)s?\s+(ago|from now|later)\b", text)
     if match:
         count = _en_number(match.group(1))
         if count is None:
             return None
         unit = match.group(2)
+        back = match.group(3) == "ago"
         if unit == "day":
-            day = now.date() - timedelta(days=count) if "ago" in text else now.date() + timedelta(days=count)
+            day = now.date() - timedelta(days=count) if back else now.date() + timedelta(days=count)
         elif unit == "week":
-            day = now.date() - timedelta(days=7 * count) if "ago" in text else now.date() + timedelta(days=7 * count)
+            day = now.date() - timedelta(days=7 * count) if back else now.date() + timedelta(days=7 * count)
         elif unit == "month":
-            day = _add_months(now.date(), -count if "ago" in text else count)
+            day = _add_months(now.date(), -count if back else count)
         else:
-            day = _add_months(now.date(), -12 * count if "ago" in text else 12 * count)
-        return make(day, force_past="ago" in text)
+            day = _add_months(now.date(), -12 * count if back else 12 * count)
+        return make(day, force_past=back)
+
+    # Sub-day offsets. "in 2 hours" and "2 hours later" are both common, and a
+    # missed parse drops the whole intention, so both spellings are handled.
+    if "half an hour" in text or "half hour" in text:
+        return _at(now + timedelta(minutes=30), raw, now)
+    match = re.search(r"\b(?:in|after)\s+([a-z]+|\d+)\s+(hour|minute)s?\b", text)
+    if match:
+        count = _en_number(match.group(1))
+        if count is None:
+            return None
+        delta = timedelta(hours=count) if match.group(2) == "hour" else timedelta(minutes=count)
+        return _at(now + delta, raw, now)
+    match = re.search(r"\b([a-z]+|\d+)\s+(hour|minute)s?\s+(?:later|from now)\b", text)
+    if match:
+        count = _en_number(match.group(1))
+        if count is None:
+            return None
+        delta = timedelta(hours=count) if match.group(2) == "hour" else timedelta(minutes=count)
+        return _at(now + delta, raw, now)
 
     match = re.search(r"\b(next|last|this)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\b", text)
     if match:
@@ -592,6 +624,20 @@ def parse_due(text: str, now: Optional[datetime] = None, tz: str = DEFAULT_TZ) -
     if "明晚" in raw:
         clock = datetime.combine(now.date() + timedelta(days=1), dt_time(23, 59, 59), tzinfo=_zone(tz))
         return _typed(now.date() + timedelta(days=1), clock, now, raw)
+
+    # Sub-day offsets come before the day/week/month rules so "两小时后" is not
+    # swallowed by a coarser match. "半小时" has no numeric token.
+    match = re.search(r"([一二三四五六七八九十两半\d]+)\s*个?\s*(?:小时|钟头)\s*[后後]", raw)
+    if match:
+        token = match.group(1)
+        if token == "半":
+            hours = 0.5
+        else:
+            count = _cn_int(token)
+            if count is None:
+                return None
+            hours = float(count)
+        return _at(now + timedelta(hours=hours), raw, now)
 
     match = re.search(r"([一二三四五六七八九十两\d]+)\s*天\s*[后後]", raw)
     if match:

@@ -246,6 +246,7 @@ class MergedMemory:
         intents_path: Optional[str] = None,
         episodes_path: Optional[str] = None,
         routines_path: Optional[str] = None,
+        reranker: Any = None,
         tz: str = DEFAULT_TZ,
         default_ttl_s: int = DEFAULT_TTL_S,
         write_sources: Iterable[str] = WRITE_SOURCES,
@@ -275,6 +276,9 @@ class MergedMemory:
             resolved_episodes_path, default_tz=self.tz, vector_index=vector_index,
         )
         self.routines = routines or RoutineStore(resolved_routines_path, default_tz=self.tz)
+        # Optional cross-encoder for retrospective search. None keeps the
+        # lexical + vector order untouched, so nothing changes by default.
+        self.reranker = reranker
         self._vec_cache: Dict[str, Sequence[float]] = {}
 
     @staticmethod
@@ -333,7 +337,7 @@ class MergedMemory:
             return {"status": "no_result", "episode_id": episode_id}
 
         beliefs = self._write_beliefs(extraction.beliefs, text, now_dt, episode_id=episode_id)
-        intents = self._write_intentions(extraction.intentions, text, now_dt)
+        intents, dropped_intents = self._write_intentions(extraction.intentions, text, now_dt)
         if episode_id and (beliefs or intents):
             self.episodes.link(
                 episode_id,
@@ -344,6 +348,7 @@ class MergedMemory:
             "status": "success" if (beliefs or intents) else "no_change",
             "beliefs": len(beliefs),
             "intentions": len(intents),
+            "dropped_intentions": dropped_intents,
             "episode_id": episode_id,
             "belief_ids": [item.id for item in beliefs],
             "intent_ids": [item.id for item in intents],
@@ -411,7 +416,7 @@ class MergedMemory:
                 invalid_intents += 1
 
         written_beliefs = self._write_beliefs(valid_beliefs, "", now_dt, episode_id=episode_id)
-        written_intents = self._write_intentions(valid_intents, "", now_dt)
+        written_intents, dropped_intents = self._write_intentions(valid_intents, "", now_dt)
         belief_ids = [item.id for item in written_beliefs]
         intent_ids = [item.id for item in written_intents]
         if episode_id and (written_beliefs or written_intents):
@@ -433,7 +438,7 @@ class MergedMemory:
             "distinct_beliefs": len(set(belief_ids)),
             "distinct_intentions": len(set(intent_ids)),
             "dropped_beliefs": 0,
-            "dropped_intentions": 0,
+            "dropped_intentions": dropped_intents,
             "invalid_beliefs": invalid_beliefs,
             "invalid_intentions": invalid_intents,
             "belief_ids": belief_ids,
@@ -518,9 +523,11 @@ class MergedMemory:
         after: Any = None,
         before: Any = None,
         limit: int = 3,
+        reranker: Any = None,
     ) -> List[Dict[str, Any]]:
         return self.episodes.search(
             self.user_id, query, after=after, before=before, limit=limit,
+            reranker=reranker if reranker is not None else self.reranker,
         )
 
     def prune_episodes(
@@ -665,19 +672,35 @@ Return JSON only:
                 logger.warning("belief write failed: %s", item.label, exc_info=True)
         return written
 
-    def _write_intentions(self, intentions: List[IntentIn], user_msg: str, now: datetime) -> List[Any]:
+    def _write_intentions(self, intentions: List[IntentIn], user_msg: str, now: datetime):
+        """Return (written, dropped).
+
+        A surface due we cannot parse used to disappear without a trace, so a
+        caller could not tell "nothing to remember" from "everything was
+        dropped". The count is now returned and each drop is logged.
+        """
         written = []
+        dropped = 0
         for draft in intentions:
             title = (draft.action or "").strip()
             if len(title) < 2:
+                dropped += 1
                 continue
             due = parse_due(draft.due, now, self.tz) if draft.due else None
             if due is not None and due.kind == "past":
+                dropped += 1
+                logger.info("intention dropped (past due): %s", title)
                 continue
             if due is not None and due.kind == "recurring":
+                dropped += 1
+                logger.info("intention dropped (recurring): %s", title)
                 continue
             # A surface due we cannot parse must not silently become a 24h TTL.
             if draft.due and due is None and not draft.ttl_hours:
+                dropped += 1
+                logger.warning(
+                    "intention dropped (unparsed due %r): %s", draft.due, title,
+                )
                 continue
 
             if due is not None and due.due_ts is not None:
@@ -714,8 +737,9 @@ Return JSON only:
                     now=now,
                 ))
             except Exception:
+                dropped += 1
                 logger.warning("intention write failed: %s", title, exc_info=True)
-        return written
+        return written, dropped
 
     # ---------------------------------------------------------------- read
     def build_context(

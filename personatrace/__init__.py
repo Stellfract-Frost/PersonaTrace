@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__version__ = "2.0.2"
+__version__ = "2.1.0"
 
 # 轻量、无外部依赖的成员（导入本包时不触发 chromadb / requests）
 from .config import PersonaConfig
@@ -77,9 +77,10 @@ __all__ = [
     "PersonaConfig",
     "LLMClient",
     "extract_json",
-    # Migration-only surface.
-    "VectorStore",
 ]
+# ``VectorStore`` stays importable for scripts/migrate_v1.py but is deliberately
+# absent from __all__ / __dir__: it is the retired v1 vector layer, and
+# advertising it suggests beliefs live in a vector store, which they do not.
 
 
 def __getattr__(name: str) -> Any:

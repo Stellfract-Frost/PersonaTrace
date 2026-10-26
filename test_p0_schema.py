@@ -222,3 +222,35 @@ def test_iso_datetime_with_offset():
     assert utc is not None
     assert datetime.fromtimestamp(utc.at, Z).strftime("%H:%M") == "19:00"
 
+
+
+def test_hour_level_offsets_parse():
+    """"两小时后" used to return None, which dropped the whole intention."""
+    now = datetime(2026, 10, 25, 10, 0, tzinfo=Z)
+    for raw, minutes in (
+        ("两小时后", 120), ("3小时后", 180), ("半小时后", 30),
+        ("in 2 hours", 120), ("2 hours later", 120), ("after 2 hours", 120),
+        ("half an hour", 30), ("in 45 minutes", 45),
+    ):
+        item = parse_due(raw, now, TZ)
+        assert item is not None, raw
+        assert item.kind == "due"
+        assert round((item.due_ts - now.timestamp()) / 60) == minutes, raw
+
+
+def test_english_later_and_after_parse_like_in():
+    now = datetime(2026, 10, 25, 10, 0, tzinfo=Z)
+    base = parse_due("in 3 days", now, TZ)
+    for raw in ("3 days later", "three days later", "after 3 days"):
+        item = parse_due(raw, now, TZ)
+        assert item is not None, raw
+        assert item.due_ts == base.due_ts, raw
+
+
+def test_existing_time_expressions_unchanged():
+    """Guard the fix against regressions in the expressions that already worked."""
+    now = datetime(2026, 10, 25, 10, 0, tzinfo=Z)
+    assert parse_due("3 days ago", now, TZ).kind == "past"
+    assert parse_due("上周五去了海边", now, TZ).kind == "past"
+    for raw in ("下周三", "next Wednesday", "三天后", "明天下午三点", "月底", "今晚"):
+        assert parse_due(raw, now, TZ) is not None, raw

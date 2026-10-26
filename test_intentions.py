@@ -141,3 +141,39 @@ def test_concurrent_upserts_are_serialized():
 
     assert not errors, errors
     assert len(store.list("u")) == 1
+
+
+def test_sweep_closes_overdue_after_grace():
+    """An expired intention must stop being reported as active.
+
+    ``_dynamic_status`` computed ``expired`` for display but nothing wrote it
+    back, so a 20-day-overdue task still showed up in ``list(statuses=active)``.
+    """
+    store = IntentStore(":memory:", default_tz=TZ)
+    make(store, "交周报", dt(25), grace_s=86400)
+
+    assert [row.status for row in store.list("u", statuses=("active",))] == ["active"]
+
+    # One day past the deadline is still inside the grace window.
+    assert store.sweep("u", now=dt(26, 12)) == 0
+    assert len(store.list("u", statuses=("active",))) == 1
+
+    # Five days past the deadline is past grace.
+    assert store.sweep("u", now=dt(30, 12)) == 1
+    assert store.list("u", statuses=("active",)) == []
+    assert [row.status for row in store.list("u")] == ["expired"]
+
+
+def test_select_agenda_sweeps_expired_rows():
+    store = IntentStore(":memory:", default_tz=TZ)
+    make(store, "交周报", dt(25), grace_s=86400)
+    assert store.select_agenda("u", now=dt(30, 12))["items"] == []
+    assert store.list("u", statuses=("active",)) == []
+
+
+def test_recurring_series_is_not_swept():
+    """A series has a moving due date and must not be closed as a whole."""
+    store = IntentStore(":memory:", default_tz=TZ)
+    make(store, "每周上课", dt(25), rrule="FREQ=WEEKLY;BYDAY=TU", grace_s=0)
+    assert store.sweep("u", now=dt(30, 12)) == 0
+    assert len(store.list("u", statuses=("active",))) == 1

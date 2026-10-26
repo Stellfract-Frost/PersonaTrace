@@ -32,6 +32,7 @@ class LLMClient:
         max_tokens: int = 8192,
         temperature: float = 0.7,
         model: Optional[str] = None,
+        thinking: Optional[str] = None,
     ) -> str:
         """Send a chat request and return the text response.
         Args:
@@ -39,6 +40,9 @@ class LLMClient:
             max_tokens: max tokens to generate
             temperature: sampling temperature
             model: override the default model
+            thinking: ``"enabled"`` / ``"disabled"``; None leaves the provider
+                default. DeepSeek enables thinking by default, so evaluation
+                runs that want a plain answer must pass ``"disabled"``.
         Returns:
             LLM-generated text response
         Raises:
@@ -66,6 +70,8 @@ class LLMClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        if thinking:
+            payload["thinking"] = {"type": thinking}
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=120)
             resp.raise_for_status()
@@ -87,6 +93,9 @@ class LLMClient:
             messages: message list
             max_tokens: max tokens to generate
             model: override the default model
+            thinking: ``"enabled"`` / ``"disabled"``; None leaves the provider
+                default. DeepSeek enables thinking by default, so evaluation
+                runs that want a plain answer must pass ``"disabled"``.
         Returns:
             Parsed JSON dict, or None if parsing fails
         """

@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.1.0
+
+- Episode fusion no longer concatenates the two retrieval arms. Each arm is
+  min-max scaled and blended (vector 1.0 / lexical 0.5); the old concatenation
+  made the lexical arm unreachable whenever the vector arm filled the limit.
+  `merged` recall@3 75.6% → 79.9%, `all@10` 88.0% → 93.2% on the 133-question
+  LongMemEval subset. Pure RRF was measured and rejected: it loses the score
+  magnitude that session aggregation relies on (recall@3 79.9% → 60.1%).
+- Optional cross-encoder reranking inside the store: `EpisodeStore.search(...,
+  reranker=, rerank_top=30)`, `MergedMemory(reranker=...)` and
+  `MergedMemory.episodes_search(..., reranker=)`. Reranked results report
+  rank-monotone scores so downstream aggregation cannot invert the order.
+  With reranking: recall@3 85.5%, `all@10` 94.7%, MRR 0.925.
+- Intentions now expire for real: `IntentStore.sweep()` writes `expired` back to
+  rows whose grace window has passed, `select_agenda()` sweeps before reading,
+  and `list(..., sweep=True)` is available. Recurring series are skipped.
+- Unparsed or past due dates are no longer dropped silently:
+  `_write_intentions` returns `(written, dropped)` and logs each drop,
+  `write()`/`remember()` report a real `dropped_intentions` count.
+- Time parsing covers hour-level offsets and more English forms: `两小时后`,
+  `半小时后`, `in 2 hours`, `2 hours later`, `after 2 hours`, `half an hour`,
+  `3 days later`, `after 3 days`.
+- `LLMClient.chat()` accepts `thinking="enabled"|"disabled"`; the default
+  (`None`) leaves the provider setting untouched. Reasoning models bill thinking
+  tokens against `max_tokens`, so an undersized budget returns empty content.
+- `VectorStore` (retired v1 layer) is no longer exported from `__all__`; it stays
+  importable for `scripts/migrate_v1.py`.
+- Evaluation harness: `--session-chars`, `--context-k`, `--assistant-chars`,
+  `--workers`, `--no-thinking`, `--date-hint`, `--ids`; per-stage token
+  accounting and incremental result checkpoints.
+- LongMemEval_s 500-question result: 431/500 = 86.2% LLM self-judge; rule-judge
+  lower bound 78.4%; about ¥5.50. The 133 temporal subset is 119/133 = 89.5%.
+
 ## 2.0.2
 
 - Fix CI: add `python-dateutil` (weekly recurrence) and Windows `tzdata`

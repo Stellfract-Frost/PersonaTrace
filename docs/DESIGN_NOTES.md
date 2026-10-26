@@ -255,6 +255,24 @@ It is a hint, not a message. `skipped_today` is not `denied`; silence is
     restart silently loses three of the four memory types.
 31. **Pinned categories must be one list.** `boundaries` was pinned in the
     outer ranker but not in `MemoryV2.recall`; the MCP path used the latter.
+32. **Concatenating two retrieval arms starves the second one.** Appending
+    lexical hits after every vector hit made them unreachable once the vector
+    arm filled `limit` — the "hybrid" path was vector-only in disguise. Min-max
+    scale each arm and blend with weights (vector 1.0 / lexical 0.5).
+33. **Rank-only scores break `max()` aggregation.** Pure RRF lost 20 points of
+    recall@3 because the caller aggregates episode scores per session with
+    `max()`, and rank scores carry no magnitude. When reranking, emit
+    rank-monotone scores so a downstream re-sort cannot invert head and tail;
+    mixing cross-encoder logits with fused scores did exactly that
+    (recall@3 79.9% → 31.7%).
+34. **Assistant replies are not context, they are boilerplate.** 88% of the
+    corpus characters are assistant turns, almost all of it advice-shaped.
+    Clipping them to 200 chars cut the prompt by 75% and *raised* accuracy
+    (114/133 → 123/133): the long replies were diluting the facts.
+35. **A budget too small for the reasoning chain looks like a refusal.** Thinking
+    tokens are billed against `max_tokens`; at 4,000 the model returned empty
+    content on ~6% of questions. Give the first attempt 16,000 instead of
+    retrying, which costs a second full prompt.
 
 ## 5. Deliberately not done
 
@@ -264,8 +282,8 @@ It is a hint, not a message. `skipped_today` is not `denied`; silence is
 - no full semantic alias merge; dedup is lexical and conservative;
 - no automatic background messages; probes are in-turn hints only;
 - no full RFC 5545 RRULE parser; weekly fields are normalized internally;
-- no 100+ query benchmark; the 50-query lexical channel is a CI regression
-  gate, not a held-out benchmark;
+- no held-out internal benchmark; the 50-query lexical channel is a CI
+  regression gate. The external 500-question result lives in LONGMEMEVAL.md;
 - no Redis requirement; SQLite is enough for a local single user.
 
 ## 6. Reproduce
@@ -281,6 +299,6 @@ The evaluation script prints the actual numbers; it does not hard-code the
 table above. If the embedding model is unavailable, it falls back to a hashing
 embedder and labels the run accordingly.
 
-The external LongMemEval temporal-reasoning run is documented separately in
-[LONGMEMEVAL.md](LONGMEMEVAL.md). It is not a full benchmark and uses the same
-model as answerer and judge; the hook caveat is recorded there.
+The external 500-question LongMemEval_s result is documented separately in
+[LONGMEMEVAL.md](LONGMEMEVAL.md). It uses the same model as answerer and judge;
+the self-judge and preference-judge caveats are recorded there.

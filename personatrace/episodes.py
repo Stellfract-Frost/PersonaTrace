@@ -25,6 +25,14 @@ from zoneinfo import ZoneInfo
 DEFAULT_TZ = "Asia/Shanghai"
 DEFAULT_EPISODE_TTL_DAYS = 90
 MAX_EPISODE_CANDIDATES = 5000
+# Reciprocal rank fusion constant, matching the usual 60. Kept for callers that
+# still ask for rank fusion; the store's own merge uses scaled weights below.
+RRF_K = 60
+# Relative weight of each retrieval arm when the two are blended. The vector arm
+# leads because episode text is a whole exchange; lexical only rescues exact
+# names and numbers the embedder blurs.
+VECTOR_WEIGHT = 1.0
+LEXICAL_WEIGHT = 0.5
 ALLOWED_SOURCES = frozenset({"direct", "bridge", "console"})
 logger = logging.getLogger(__name__)
 
@@ -95,6 +103,12 @@ def _epoch(value: Any) -> Optional[float]:
 
 def _like_escape(text: str) -> str:
     return text.replace("~", "~~").replace("%", "~%").replace("_", "~_")
+
+
+def _episode_doc(episode: Episode, limit: int = 1500) -> str:
+    """Text handed to a reranker. Cross-encoders cap at 512 tokens anyway."""
+    text = f"{episode.user_msg}\n{episode.ai_reply}".strip()
+    return text[:limit] or " "
 
 
 def _tokens(text: str) -> List[str]:
@@ -309,8 +323,17 @@ class EpisodeStore:
         before: Any = None,
         limit: int = 3,
         include_reply: bool = True,
+        reranker: Any = None,
+        rerank_top: int = 30,
     ) -> List[Dict[str, Any]]:
-        """Lexical + recency retrieval inside an optional time window."""
+        """Lexical + recency retrieval inside an optional time window.
+
+        ``reranker`` is an optional cross-encoder-like object exposing
+        ``predict([(query, doc), ...]) -> scores``. When given, the head of the
+        fused list is re-scored and the tail keeps the fused order, so recall at
+        larger k is unchanged. Passing ``None`` (the default) leaves behaviour
+        exactly as it was.
+        """
         after_ts = _epoch(after)
         before_ts = _epoch(before)
         q = (query or "").strip()
@@ -395,17 +418,53 @@ class EpisodeStore:
                 lexical_hits.append((lexical + 0.25 / (1.0 + age_days / 30.0), ep))
             lexical_hits.sort(key=lambda item: (-item[0], -item[1].ts))
 
-        seen: set[str] = set()
-        merged: List[tuple[float, Episode]] = []
-        for score, episode in vector_hits + lexical_hits:
-            if episode.id in seen:
+        # Merge the two arms on one scale instead of concatenating: appending
+        # lexical hits after every vector hit meant lexical contributed nothing
+        # once the vector arm filled the limit, so "hybrid" was really
+        # vector-only. Pure rank fusion (RRF) was measured separately and lost
+        # 15 points of recall@3 here, because the caller aggregates episode
+        # scores per session with max() and rank-only scores destroy the
+        # magnitude information that aggregation relies on. Min-max scaling per
+        # arm keeps both the scale and the contribution.
+        by_id: Dict[str, Episode] = {}
+        blended: Dict[str, float] = {}
+        for weight, hits in ((VECTOR_WEIGHT, vector_hits), (LEXICAL_WEIGHT, lexical_hits)):
+            if not hits:
                 continue
-            seen.add(episode.id)
-            merged.append((score, episode))
-        return [
-            {**ep.to_dict(include_reply, self.tz), "score": round(score, 4)}
-            for score, ep in merged[:max(1, int(limit))]
-        ]
+            top = max(score for score, _ in hits) or 1.0
+            for score, episode in hits:
+                by_id.setdefault(episode.id, episode)
+                blended[episode.id] = blended.get(episode.id, 0.0) + (
+                    weight * max(0.0, score) / top
+                )
+        ordered = sorted(blended.items(), key=lambda item: (-item[1], item[0]))
+        reranked = False
+        if reranker is not None and q and ordered:
+            head = ordered[:max(1, int(rerank_top))]
+            try:
+                pairs = [(q, _episode_doc(by_id[eid])) for eid, _ in head]
+                scores = reranker.predict(pairs, batch_size=32, show_progress_bar=False)
+                by_score = sorted(
+                    ((eid, float(score)) for (eid, _), score in zip(head, scores)),
+                    key=lambda kv: (-kv[1], kv[0]),
+                )
+                ordered = by_score + ordered[len(head):]
+                reranked = True
+            except Exception:
+                logger.warning("episode rerank failed; keeping fused order", exc_info=True)
+        rows = []
+        for rank, (episode_id, score) in enumerate(ordered[:max(1, int(limit))], 1):
+            # A cross-encoder returns logits on a different scale from the fused
+            # fused score (roughly -11..+11 vs 0..2). Mixing the two and letting a
+            # caller re-sort by score silently inverted the head and the tail.
+            # Emit a rank-monotone score instead so any downstream max/order
+            # aggregation sees one consistent scale.
+            value = 1.0 / rank if reranked else score
+            rows.append({
+                **by_id[episode_id].to_dict(include_reply, self.tz),
+                "score": round(value, 6),
+            })
+        return rows
 
     def delete(self, episode_id: str) -> bool:
         with self._lock:
