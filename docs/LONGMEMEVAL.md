@@ -73,12 +73,13 @@ The benchmark uses the episode path end to end:
 `episodes_search` directly, so the gate is not on the measured retrieval path;
 it is a host-integration check, not a benchmark filter.
 
-Chinese and English time expressions reach the same parser:
+Chinese and English time expressions reach the same parser. The English forms:
 
 ```text
 yesterday / last Friday / next Monday / in 3 days / 2 hours later
-昨天 / 上周五 / 下周三 / 三天后 / 两小时后
 ```
+
+Chinese equivalents are accepted by the same parser.
 
 ## What not to claim
 

@@ -145,18 +145,18 @@ to RRULE for portability. A full RRULE parser is not required on day one.
 ### One-off vs weekly
 
 ```text
-"明天要上课"
+"class tomorrow"
   → one-off Intention
   → Routine candidate anchored to the same weekday next week
   → only after explicit confirmation does it become weekly
 
-"每周二 19:00 上课"
+"class every Tuesday at 19:00"
   → weekly Routine directly (explicit recurrence)
 
-"今天没课"
+"no class today"
   → skipped_today, not a denial of the weekly routine
 
-"以后周二都不上课了"
+"no more Tuesday classes"
   → denied / ended
 ```
 

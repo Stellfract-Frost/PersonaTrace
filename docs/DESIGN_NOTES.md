@@ -10,21 +10,21 @@ had no way to say *what kind of answer it wanted*.
 The test query was:
 
 ```text
-我那个 deadline 是几号
+When exactly is my deadline?
 ```
 
-The store contained `周五要演示`. The answer was "I don't have that deadline."
+The store contained `demo on Friday`. The answer was "I don't have that deadline."
 Three independent channels failed at once:
 
 | Channel | What it measured | Why it failed |
 |---|---|---|
-| lexical IDF | shared character bigrams | `deadline` is Latin; no Chinese label shares it |
+| lexical IDF | shared character bigrams | `deadline` is Latin; no label shares it |
 | embedding cosine | semantic similarity | a 4–8 character label is a noisy embedding unit; "deadline date" requires inference, not synonym matching |
-| structured time | `due_at_ts` | the extractor never wrote a due timestamp for `周五要演示` |
+| structured time | `due_at_ts` | the extractor never wrote a due timestamp for `demo on Friday` |
 
 The last one was the useful discovery: the sentence already contained a
 structured slot. The model did not need to be smarter; the write path needed to
-put `周五` into a typed field.
+put `Friday` into a typed field.
 
 ## 2. Measure first
 
@@ -70,14 +70,14 @@ enter retention, pinned budgets or the profile prompt.
 
 A single `due_at_ts` float cannot distinguish:
 
-- a future deadline (`下周三交周报`)
-- a past event (`上周五去了海边`)
-- a recurring habit (`每天十点睡`)
-- a fuzzy window (`年底前换工作`)
+- a future deadline (`submit the weekly report next Wednesday`)
+- a past event (`went to the beach last Friday`)
+- a recurring habit (`sleep at 10 every night`)
+- a fuzzy window (`change jobs before the end of the year`)
 
 The kernel now carries `time_kind` and `time_raw` alongside `due_at_ts`.
 `parse_due()` resolves common Chinese and English expressions in code
-(`明天`, `下周三`, `today`, `in 3 days`, `2 weeks ago`, `next Monday`, ...);
+(`tomorrow`, `next Wednesday`, `today`, `in 3 days`, `2 weeks ago`, `next Monday`, ...);
 the model only supplies the surface phrase. Past expressions are refused before
 they can become deadlines.
 
@@ -105,9 +105,9 @@ score = (0.15 + 0.85 * sim) * (0.35 + 0.65 * retention)
 
 ### 3.4 Time facet is a conditional bypass
 
-`time_intent` includes `几号 / 哪天 / 什么时候 / 截止 / deadline / ddl / 日程 /
-安排 / 到期 / 之前 / 之后`. `TIME_HABIT` (`平时 / 每天 / 一般 / 习惯 / 通常 /
-总是`) disables the facet. The bucket is unioned with vector results, not used
+`time_intent` includes `which day / when / deadline / due / schedule /
+plan / before / after`. `TIME_HABIT` (`usually / every day / generally /
+habit / normally / always`) disables the facet. The bucket is unioned with vector results, not used
 as a replacement. It holds at most two items.
 
 ### 3.5 Beliefs and intentions are different memory types
@@ -121,7 +121,7 @@ Long-term preference and a one-off commitment must not share a table:
 | identity | `uuid5(user:track:category:label)` | `uuid5(user:title:date)` |
 | disappearance | archive at low retention | `done/cancelled/expired` |
 
-A one-off "后天要上课" stays important even if it was mentioned once.
+A one-off "class the day after tomorrow" stays important even if it was mentioned once.
 `importance` is a write-time axis; `hits` does not raise it. No due date means
 an explicit TTL, not an invented deadline.
 
@@ -144,13 +144,14 @@ similar labels through embeddings; the merged facade does a smaller, explicit
 check before writing:
 
 - normalize possessives and common intensifiers;
-- normalize a few synonym pairs (`偏好 → 喜欢`, `在赶 → 在做`);
+- normalize a few synonym pairs (for example, prefer → like, working on → doing);
 - compare labels in the same category with `SequenceMatcher` at `>= 0.96`;
 - never merge labels whose numbers/months/quantities differ;
 - never merge two items with different typed time slots.
 
-This catches `喜欢深色主题` / `偏好深色主题` and `名字叫小陌` / `我的名字叫小陌`,
-while keeping `喜欢猫` / `喜欢猫毛` and `周五要演示` / `下周三演示` separate. It
+This catches `likes a dark theme` / `prefers a dark theme` and `name is Mo` /
+`my name is Mo`, while keeping `likes cats` / `likes cat hair` and
+`demo on Friday` / `demo next Wednesday` separate. It
 does not create an alias table: a low-lexical-overlap paraphrase can still
 produce a second record.
 
@@ -159,7 +160,7 @@ produce a second record.
 Beliefs are conclusions; episodes are the turns they came from. `EpisodeStore`
 keeps `user_msg`, `ai_reply`, time and links to belief/intention ids in SQLite.
 `build_context()` includes episodes only for retrospective markers (`last time`,
-`previously`, `还记得`, `上次`); ordinary queries do not replay the transcript.
+`previously`, `remember`, `last time`); ordinary queries do not replay the transcript.
 New beliefs point at an `episode_id` instead of copying the turn into L0.
 A Chroma collection (`episode_turns`) can provide semantic candidates, but the
 SQLite episode row remains the source of truth; no Chroma means lexical + time
@@ -180,11 +181,11 @@ It is a hint, not a message. `skipped_today` is not `denied`; silence is
 
 1. **A single `due` float is not a time model.** It cannot carry past,
    recurring, or range semantics.
-2. **Category is not a time gate.** `state` can contain "周五要演示"; only
+2. **Category is not a time gate.** `state` can contain "demo on Friday"; only
    typed time plus a parser catches it.
 3. **Do not put tasks in the belief table.** A task has a lifecycle; retention
    is the wrong clock.
-4. **Do not merge tasks by label.** "这周三上课" and "下周三上课" are two
+4. **Do not merge tasks by label.** "class this Wednesday" and "class next Wednesday" are two
    records.
 5. **Pinned must not eat the budget.** With many pinned rows and `k=3`, the
    query gets no slot and recall becomes a constant. Cap pinned at half the
@@ -193,9 +194,9 @@ It is a hint, not a message. `skipped_today` is not `denied`; silence is
    that returns the same ranking for every query adds noise.
 7. **Vector z-score is a scale fix, not a quality fix.** It makes cosine scores
    comparable inside a candidate set; it does not make a weak embedding good.
-8. **`平时几点睡` is not a deadline query.** Negative habit terms must disable
+8. **`what time do you usually sleep` is not a deadline query.** Negative habit terms must disable
    the time bucket.
-9. **`上周五` must not become today.** Past expressions return `kind="past"`;
+9. **`last Friday` must not become today.** Past expressions return `kind="past"`;
    the write path refuses them.
 10. **Do not run v1 `_decay_all` and v2 retention together.** Two clocks produce
     two confidences and an unexplainable rank.

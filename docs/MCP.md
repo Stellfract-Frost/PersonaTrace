@@ -66,10 +66,10 @@ API key, or network is required. Set `PERSONA_DB` to another path to move it;
   observation is at or after its invalidation time; pass `false` to keep it
   closed.
 - `hidden`: how many related items were squeezed out by the budget.
-- `agenda_lines`: short-term intentions; `[需主动]` marks the one item whose
+- `agenda_lines`: short-term intentions; `[proactive]` marks the one item whose
   time bucket changed and may be raised proactively.
 - `episodes`: raw turns selected only for retrospective queries (`last time`,
-  `previously`, `还记得`).
+  `previously`, `remember`).
 - `routine_probes`: in-turn probe candidates; the host decides whether to ask.
   A probe is never sent by the server.
 

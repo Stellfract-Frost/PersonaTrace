@@ -1,143 +1,163 @@
-# 踩坑记录
+# Pitfalls
 
-这份文档不介绍用法，只记录做这个记忆框架时真正踩过的坑。
+This is not a usage guide. It is a record of the failures that changed the
+design.
 
-写它的原因很直接：我一开始只想做一个轻量的记忆内核，结果在"怎么把对话塞进模型"
-这件事上反复摔了十几次，每次都要重跑评测、烧掉一笔 token 才明白问题在哪。如果这些
-教训能让后来者少走一遍，文档就值了。
+The short version: I wanted a small memory kernel, then spent repeated runs and
+tokens learning that most of the problem was not the retrieval algorithm. If
+these notes save someone else one full evaluation cycle, they did their job.
 
-## 如果只记一条
+## If you remember one thing
 
-**限制"塞进去多少"，比调检索算法重要一个量级。**
+**Controlling what goes into the model matters more than tuning the retriever.**
 
-我花了几轮才接受这件事：检索的上限早就到了（all@10 94.7%），真正卡住成绩的是
-喂给模型的东西里有多少是废话、以及关键那句有没有被截掉。
+Retrieval was already good enough (`all@10` 94.7%); the real limit was how much
+boilerplate was in the context and whether the decisive sentence survived
+truncation.
 
-## 一、上下文预算
+## 1. Context budget
 
-| 每会话字符 | 正确 | 每题 token | 成本 |
-|---|---|---|---|
+| Characters per session | Correct | Tokens/question | Cost |
+|---|---:|---:|---:|
 | 4,000 | 101/133 | 9,932 | ¥1.68 |
 | 12,000 | 114/133 | 23,823 | ¥3.53 |
 
-靶向验证更直接：挑 17 道错题，只改字符上限，**12 道当场答对**。
+A targeted check was more direct: on 17 wrong answers, changing only the
+character limit fixed 12 immediately.
 
-但 12,000 让 token 涨了 2.4 倍。真正的解法不是继续加字符，而是下一节。
+But 12,000 characters made tokens 2.4× larger. The real fix was the next
+section, not a larger budget.
 
-## 二、88% 的字符是助手回复
+## 2. Assistant replies are 88% of the corpus
 
-统计整个语料：用户发言只占 **12%**，助手回复占 **88%**，内容基本是
-"恭喜你！以下是 5 条建议……"。这些对回答问题没用，还会稀释注意力。
+Across the whole corpus, user turns are only **12%** of characters; assistant
+turns are **88%**, mostly "Congratulations! Here are five suggestions..."
+boilerplate. It does not help answer the question and dilutes attention.
 
-把助手回复截到 200 字：
+Clipping assistant replies to 200 characters:
 
-| | 正确 | 每题 token | 成本 |
-|---|---|---|---|
-| 全量文本 | 114/133 | 23,823 | ¥3.53 |
-| **助手截 200 字** | **123/133** | **6,743** | **¥1.18** |
+| | Correct | Tokens/question | Cost |
+|---|---:|---:|---:|
+| Full text | 114/133 | 23,823 | ¥3.53 |
+| **Assistant clipped to 200** | **123/133** | **6,743** | **¥1.18** |
 
-**token 降到 1/3.5，准确率反而涨了 6.8 个点。** 少给噪声，比多给上下文有用。
+**Tokens fell 3.5× while accuracy rose 6.8 points.** Less noise beat more
+context.
 
-## 三、拒答不等于答不出
+## 3. "I don't know" is not always a model failure
 
-同一批题，4,000 字符时 13 道拒答，12,000 字符时只剩 4 道。
+At 4,000 characters, 13 questions refused; at 12,000, only 4 did.
 
-更值得看的是成本：**拒答题的 completion 是 2,970 token，答对题只有 551**（5.4 倍）。
-模型不是立刻放弃，而是先反复翻找，翻不到才说"没有记录"。
+The cost signal was stronger: refused answers used **2,970 completion tokens**,
+while correct answers used **551** (5.4×). The model does not give up
+immediately; it searches, fails, and then says it cannot find the answer.
 
-所以看到"我不知道"，第一反应应该是**查材料有没有进上下文**，而不是怪模型。
+When you see "I don't know", first check whether the material reached the
+context. Do not blame the model by default.
 
-## 四、融合：拼接会让词法永远进不来
+## 4. Fusion: concatenation starves the lexical arm
 
-最初的合并是"向量命中在前、词法命中追加在后"。向量返回 60 条、`limit` 也是 60 时，
-词法一条都挤不进去——所谓混合检索退化成纯向量（两个臂的数字完全一样，就是证据）。
+The first fusion put vector hits first and appended lexical hits. If the vector
+arm returned 60 hits and `limit` was 60, lexical had no room. "Hybrid" was
+vector-only in disguise; the identical numbers from both arms were the clue.
 
-改成纯 RRF（k=60）更糟：recall@3 从 79.9% 掉到 **60.1%**。
+Pure RRF (k=60) was worse: recall@3 fell from 79.9% to **60.1%**.
 
-原因是下游按 session 取 `max()` 聚合，而 RRF 输出的是全序分——**排在第一名和最后一名
-只差千分之几，量级信息被抹平**，聚合时选不出"哪一轮最能代表这个会话"。
+The downstream aggregator takes `max()` per session. RRF emits a total order
+where the first and last items differ by a tiny amount; the magnitude needed to
+choose the best exchange per session is gone.
 
-最后用的方案：**各臂先按自身最大值归一化，再加权（向量 1.0 / 词法 0.5）**。
-既让词法有发言权，又保住量级。
+The final design: **min-max scale each arm, then blend by weight** (vector 1.0 /
+lexical 0.5). The lexical arm can contribute, and the magnitude survives.
 
-## 五、重排的分数尺度会毁掉排序
+## 5. Rerank scores can destroy the ordering
 
-这个 bug 是我自己制造的：把 cross-encoder 的 logit（大约 −11..+11）和融合分（0..2）
-放进同一个列表返回，下游按 `score` 重排时，头部的负分项全被尾部的 0.5 分压下去。
+This was self-inflicted: cross-encoder logits (roughly −11..+11) and fused
+scores (0..2) were returned in one list. A downstream re-sort by `score` pushed
+negative-scoring head items below positive-scoring tail items.
 
-recall@3 从 79.9% 掉到 **31.7%**，肉眼可见地荒谬。
+Recall@3 fell from 79.9% to **31.7%** — visibly nonsensical.
 
-修法：**用位置单调的分数输出**（`1/rank`），下游无论按分数最大值聚合还是重排，
-顺序都不会被打乱。
+The fix: emit **rank-monotone scores** (`1/rank`), so a downstream max/sort
+cannot invert head and tail.
 
-## 六、thinking 是默认开的，会吃光 max_tokens
+## 6. Thinking is on by default and consumes max_tokens
 
-DeepSeek 的推理模型默认开 thinking、effort=high，**思维链和答案共用同一个
-`max_tokens` 预算**。预算给 4,000 时，约 6% 的题思维链把预算占满、`content`
-返回空串——看起来像"模型拒答"，实际是额度被推理吃光了。
+DeepSeek reasoning models enable thinking with effort=high by default. The
+chain of thought and the answer share one `max_tokens` budget. With 4,000
+tokens, about 6% of questions spent the whole budget on thinking and returned
+empty content. It looked like a refusal; it was a budget failure.
 
-代价不只在一次调用：空回答要走重试，**一次重试 34 秒、token 翻五倍**，
-因为整段上下文要重发。
+Retries made it worse: one retry took 34 seconds and 5× the tokens because the
+whole context was resent.
 
-结论只有一条：**首次就把预算给足（8,000 以上）**，不要靠重试去补。
-所以本项目的评测统一用 16,000。
+Rule: **budget the first attempt generously** (8,000+; this project used
+16,000). Do not rely on retries to repair a budget error.
 
-## 七、静默丢弃比报错可怕
+## 7. Silent drops are worse than errors
 
-意图的 due 解析失败时，代码是 `continue`——不报错、不计数，返回 `no_change`。
-调用方完全看不出"这条承诺被丢了"。
+When an intention's `due` failed to parse, the code did `continue`: no error,
+no counter, `no_change` returned. The caller could not see that a commitment
+had been dropped.
 
-同类问题：过期意图只在渲染时算成 `expired`，**从不回写数据库**，于是
-`list(statuses=("active",))` 在 20 天后仍然返回它，统计和状态展示全部虚高。
+A related bug: expired intentions were rendered as `expired` but never written
+back. `list(statuses=("active",))` still returned them after 20 days, so counts
+and dashboards were wrong.
 
-教训：**字段留了就要真的填。** 返回体里有 `dropped_intentions` 却恒为 0，
-比没有这个字段更糟——它让人以为已经处理过了。
+Lesson: **if a field exists, fill it.** A `dropped_intentions` field that is
+always 0 is worse than no field; it implies the problem is handled.
 
-## 八、时间解析的边界
+## 8. Time parsing boundaries
 
-- 中文"两小时后""半小时后"、英文"in 2 hours""3 days later" 曾经全部返回 `None`；
-- 相对时间必须以**会话日期**为锚点解析（`parse_due(text, now=session_date)`），
-  否则算出来的日期永远是错的。
+- Chinese and English relative-time expressions such as `in 2 hours` and
+  `3 days later` used to return `None`.
+- Relative time must be parsed against the **session date**
+  (`parse_due(text, now=session_date)`), otherwise the computed date is wrong.
 
-## 九、事件时间 ≠ 会话时间
+## 9. Event time is not session time
 
-对话里说的是"我昨天上了烘焙课""我第 10 次户外跑步"，而数据集只有一个会话日期。
+The conversation says "I took a baking class yesterday" or "my 10th outdoor
+run", while the dataset provides only a session date.
 
-只存会话日期，模型就只能拿它当事件日期代算。典型后果：两个事件相隔 81 天，
-gold 却是 15 周——模型算得毫厘不差，但它用错了锚点。
+Storing only the session date forces the model to use it as the event date.
+Typical consequence: two events were 81 days apart, but the gold answer was 15
+weeks. The model's arithmetic was exact; the anchor was wrong.
 
-**这是存储层的问题，不是模型不会算。** 但要说清楚：我并没有验证过"在写入时把相对
-时间换算成绝对日期就能救回这类题"——那需要另一套实验。这里只能确定一件事：只给会话
-日期、不给事件日期，模型必然算偏。
+**This is a storage-layer problem, not a model arithmetic problem.** I have not
+verified that converting relative expressions to absolute dates at write time
+fixes this class; that needs another experiment. What is certain is that a
+session date alone is not enough.
 
-## 十、存储层的两个小坑
+## 10. Two storage traps
 
-- episode 的 id 用 `uuid5(user:session:分钟:文本)`：同一会话、同一分钟、同一句话
-  会撞 id，批量 upsert 时 Chroma 直接抛 `DuplicateIDError`；
-- 某些受限环境会**静默拦截 `rm -rf`**，旧索引没删掉，于是新库 384 维、旧集合 1536 维，
-  每次查询都报 shape mismatch。清理目录要用 `shutil.rmtree` 之类能报错的写法。
+- Episode ids use `uuid5(user:session:minute:text)`: the same session, minute and
+  text collide, and a batch upsert raises `DuplicateIDError` in Chroma.
+- Some restricted environments silently block `rm -rf`. The old index survived,
+  the new collection used 384 dimensions while the old one used 1536, and every
+  query failed with a shape mismatch. Use a cleanup method that raises
+  (`shutil.rmtree`) so failure is visible.
 
-## 十一、评测方法论的坑（比代码坑更贵）
+## 11. Evaluation methodology costs more than code bugs
 
-这几条烧掉的钱比代码 bug 多：
+- **Wrong file for attribution:** analysing retrieval errors from an old
+  configuration turned "7 retrieval problems" into "16" and pointed in the wrong
+  direction. Check the artifact version before changing the criterion.
+- **Same-model judging is optimistic:** rule-based judging (numeric tolerance +
+  word coverage) on the same answers gave 123/133 vs 115/133; self-judging was
+  about 6 points higher.
+- **Prompting cannot recover data that is not there:** adding "convert yesterday
+  to an absolute date" changed none of 20 questions because the date was never
+  in the context.
 
-- **用错文件做归因**：拿了一份旧配置导出的检索顺序去分析错题，结论从"7 道检索问题"
-  变成"16 道"，方向完全错了。改判据前先核对文件版本。
-- **同模型判分偏高**：用规则判分（数字容差 + 词覆盖）复核同一批答案，
-  123/133 vs 115/133，**自判高约 6 个百分点**。
-- **提示救不了不存在的数据**：我加过"请先把 yesterday 换算成绝对日期"的提示，
-  20 题跑完一道没变——因为上下文里根本没有那个日期。
+## 12. Current score (honest version)
 
-## 十二、当前成绩（诚实版）
+LongMemEval_s, 500 questions, MergedMemory episode layer with in-library
+reranking, k=10 sessions, 12,000 chars per session, assistant replies clipped to
+200 chars, thinking enabled:
 
-LongMemEval_s 500 题，MergedMemory episode 层 + 库内重排，k=10 会话、每会话
-12,000 字符、助手回复截 200 字、thinking 开启：
+| Judge | Correct | Accuracy |
+|---|---:|---:|
+| LLM self-judge (same model as answerer) | 431/500 | **86.2%** |
+| Rule-based lower bound | — | **78.4%** |
 
-| 判分方式 | 正确 | 准确率 |
-|---|---|---|
-| LLM 自判（与作答同模型） | 431/500 | **86.2%** |
-| 规则判分下界 | — | **78.4%** |
-
-规则判分是下界，不是替代口径。500 题里 temporal 子集
-为 119/133 = 89.5%。
-
+The temporal subset is 119/133 = 89.5% of the 500-question run.

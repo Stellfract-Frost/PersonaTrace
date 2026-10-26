@@ -22,7 +22,7 @@ PersonaTrace 不是聊天机器人，也不是 agent harness。
 
 第二个是把做它时踩过的坑写下来。这里的每一个预算、融合规则和状态转换，都是拿一次
 失败的评测换来的，而大部分失败光看代码是看不出来的。它们记录在
-[docs/PITFALLS.md](docs/PITFALLS.md)，希望后来者不用再交一遍学费。
+[docs/PITFALLS.zh-CN.md](docs/PITFALLS.zh-CN.md)，希望后来者不用再交一遍学费。
 
 ## 它记什么
 
