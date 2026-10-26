@@ -141,6 +141,27 @@ def test_yearly_is_recurring_not_a_one_off_deadline():
     assert item is not None and item.kind == "recurring"
 
 
+def test_evening_twelve_is_midnight_not_noon():
+    item = parse_due("2026年10月25日晚上12点", NOW, TZ)
+    assert item is not None
+    assert datetime.fromtimestamp(item.at, Z).strftime("%Y-%m-%d %H:%M") == "2026-10-26 00:00"
+
+    half = parse_due("2026年10月25日晚上12点半", NOW, TZ)
+    assert half is not None
+    assert datetime.fromtimestamp(half.at, Z).strftime("%Y-%m-%d %H:%M") == "2026-10-26 00:30"
+
+    noon = parse_due("2026年10月25日中午12点", NOW, TZ)
+    assert noon is not None
+    assert datetime.fromtimestamp(noon.at, Z).strftime("%Y-%m-%d %H:%M") == "2026-10-25 12:00"
+
+
+def test_bare_short_weekday_does_not_match_a_label():
+    assert parse_due("备考 SAT", NOW, TZ) is None
+    next_sat = parse_due("next Sat", NOW, TZ)
+    assert next_sat is not None and next_sat.kind == "due"
+    assert datetime.fromtimestamp(next_sat.at, Z).weekday() == 5
+
+
 def test_recurring_is_typed_but_not_a_deadline():
     daily = parse_due("每天十点睡", NOW, TZ)
     weekly = parse_due("每周三上课", NOW, TZ)

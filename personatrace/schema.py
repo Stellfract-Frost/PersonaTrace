@@ -214,13 +214,21 @@ def _parse_clock(text: str, day: date, tz: str) -> Optional[datetime]:
         minute = 30 if "半" in match.group(0) else 0
     if hour is None or hour > 23 or minute > 59:
         return None
-    if re.search(r"下午|晚上|傍晚|晚间", text) and hour < 12:
+    clock_day = day
+    if re.search(r"晚上|夜间|晚间|半夜", text):
+        if hour < 12:
+            hour += 12
+        elif hour == 12:
+            # 晚上12点 is midnight at the *end* of the named day, not noon.
+            hour = 0
+            clock_day = day + timedelta(days=1)
+    elif re.search(r"下午|傍晚", text) and hour < 12:
         hour += 12
     elif re.search(r"中午", text) and hour < 11:
         hour += 12
     elif re.search(r"凌晨", text) and hour == 12:
         hour = 0
-    return datetime.combine(day, dt_time(hour, minute), tzinfo=_zone(tz))
+    return datetime.combine(clock_day, dt_time(hour, minute), tzinfo=_zone(tz))
 
 
 def _next_weekday(day: date, target: int, *, include_today: bool = True) -> date:
@@ -408,7 +416,7 @@ def _parse_english_due(raw: str, now: datetime, tz: str) -> Optional[TypedTime]:
     if match:
         return make(_next_weekday(now.date(), _EN_WEEKDAYS[match.group(1)], include_today=True))
 
-    match = re.fullmatch(r"(?:on\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)", text)
+    match = re.fullmatch(r"(?:on\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)", text)
     if match:
         return make(_next_weekday(now.date(), _EN_WEEKDAYS[match.group(1)], include_today=True))
 
@@ -442,8 +450,10 @@ def _parse_english_due(raw: str, now: datetime, tz: str) -> Optional[TypedTime]:
             return make(date(now.year, 12, 31))
         return make(_month_end(now.year, now.month))
 
+    # Bare three-letter forms are too ambiguous in free text ("备考 SAT");
+    # keep them only behind an explicit next/this/on/by cue above.
     match = re.search(
-        r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\b",
+        r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
         text,
     )
     if match:

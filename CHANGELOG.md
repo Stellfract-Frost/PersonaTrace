@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.1
+
+- `晚上12点` now resolves to midnight at the end of the named day
+  (`次日 00:00`), not noon. `中午12点` stays noon; `晚上12点半` keeps the
+  half-hour and rolls the date.
+- Bare three-letter English weekdays are no longer date cues in free text.
+  `备考 SAT` returns `None` instead of next Saturday; explicit forms such as
+  `next Sat` / `on Sat` still work. Full weekday names still parse.
+- Add regression coverage for both cases.
+
 ## 2.1.0
 
 - Episode fusion no longer concatenates the two retrieval arms. Each arm is
