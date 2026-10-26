@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.2
+
+- `今晚12点` now uses the same evening-midnight rule as `晚上12点`; a bare
+  `今晚` still falls back to 23:59:59.
+
 ## 2.1.1
 
 - `晚上12点` now resolves to midnight at the end of the named day

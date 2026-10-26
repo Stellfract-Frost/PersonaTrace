@@ -215,7 +215,7 @@ def _parse_clock(text: str, day: date, tz: str) -> Optional[datetime]:
     if hour is None or hour > 23 or minute > 59:
         return None
     clock_day = day
-    if re.search(r"晚上|夜间|晚间|半夜", text):
+    if re.search(r"晚上|夜间|晚间|半夜|今晚", text):
         if hour < 12:
             hour += 12
         elif hour == 12:
@@ -626,7 +626,9 @@ def parse_due(text: str, now: Optional[datetime] = None, tz: str = DEFAULT_TZ) -
             return _typed(day, clock, now, raw)
 
     if "今晚" in raw:
-        clock = datetime.combine(now.date(), dt_time(23, 59, 59), tzinfo=_zone(tz))
+        clock = _parse_clock(raw, now.date(), tz)
+        if clock is None:
+            clock = datetime.combine(now.date(), dt_time(23, 59, 59), tzinfo=_zone(tz))
         return _typed(now.date(), clock, now, raw)
     if "明早" in raw:
         clock = datetime.combine(now.date() + timedelta(days=1), dt_time(8, 0), tzinfo=_zone(tz))

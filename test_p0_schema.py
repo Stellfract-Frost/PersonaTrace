@@ -154,6 +154,10 @@ def test_evening_twelve_is_midnight_not_noon():
     assert noon is not None
     assert datetime.fromtimestamp(noon.at, Z).strftime("%Y-%m-%d %H:%M") == "2026-10-25 12:00"
 
+    tonight = parse_due("今晚12点", NOW, TZ)
+    assert tonight is not None
+    assert datetime.fromtimestamp(tonight.at, Z).strftime("%Y-%m-%d %H:%M") == "2026-10-24 00:00"
+
 
 def test_bare_short_weekday_does_not_match_a_label():
     assert parse_due("备考 SAT", NOW, TZ) is None

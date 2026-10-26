@@ -1,15 +1,13 @@
 # LongMemEval: 500-question result
 
 Primary external result for the episode layer. This is `LongMemEval_s` with all
-six question types, not just the temporal subset.
+six question types, 500 questions in one run.
 
 The answerer and judge are both `deepseek-flash` at temperature 0. This is a
 self-judge setup, not GPT-4o; do not compare the accuracy column directly with
 published GPT-4o numbers.
 
 ## Accuracy
-
-Source: `data/lme_500_final.json`.
 
 | Question type | Questions | Correct | Accuracy | tok/question |
 |---|---:|---:|---:|---:|
@@ -21,26 +19,27 @@ Source: `data/lme_500_final.json`.
 | single-session-preference | 30 | 18 | 60.0% | 25,022 |
 | **total** | **500** | **431** | **86.2%** | **8,467** |
 
-Scoring notes:
-
 - LLM self-judge: **431/500 = 86.2%**
 - Rule-judge lower bound: **78.4%**
-- Cost: **≈ ¥5.50**
+- Cost: **≈ ¥5.50** (input ¥1/M cache-miss, output ¥4/M)
 
-The 133-question temporal subset is 119/133 = **89.5%** in this 500-question
-result. This supersedes the earlier 133-question diagnostic for headline claims.
+## Reproduce
 
-Compared with the earlier 500-question run (`data/lme_500.json`, 423/500):
+The configuration below is the default for the harness; the only flags you need
+are the dataset selection and the per-session budget.
 
-```text
-total          423 -> 431  (+8)
-5 categories   identical
-preference     10/30 -> 18/30  (+8 net; 10 gained, 2 lost)
-non-preference 0 changed
+```bash
+PERSONA_LLM_MODEL=deepseek-flash python scripts/eval_longmemeval.py \
+  --question-type all \
+  --chroma data/chroma_lme --reuse-index \
+  --arms merged+rerank --answerer llm \
+  --workers 6 --context-k 10 --session-chars 12000 --assistant-chars 200 \
+  --results data/lme_500.json
 ```
 
-The gains and losses are all inside the preference slice; no non-preference
-question changed. That is the useful regression signal from this update.
+- `--question-type all` selects all six question types (500 questions).
+- `--reuse-index` skips the embedding step after the first build.
+- `--session-chars 12000 --assistant-chars 200` set the context budget.
 
 ## Key configuration
 
@@ -53,7 +52,8 @@ question changed. That is the useful regression signal from this update.
 | Fusion | per-arm min-max scaling, vector 1.0 / lexical 0.5 | concatenation starved the lexical arm; pure RRF lost magnitude |
 | Rerank | `ms-marco-MiniLM-L-6-v2`, exchange-level chunks | cross-encoder has the same 512-token limit |
 | Session budget | top-10 sessions × 12,000 chars | 4,000 chars truncated most sessions |
-| Assistant replies | clipped to 200 chars | assistant text is most of the corpus and mostly boilerplate |
+| Assistant replies | kept in full for `single-session-assistant` and `single-session-preference`; clipped to 200 chars for the other four types | the answer lives in the assistant's own words for those two types |
+| Answer prompt | recommendation questions must name the remembered preference they build on | grounds the answer in the user's history instead of generic advice |
 | Answer/judge | `deepseek-flash`, temperature 0, thinking on | self-judge bias is a scoring limitation |
 | Write path | `MergedMemory.record_turn` | benchmark writes through the facade |
 | Retrieval path | `MergedMemory.episodes_search` | the merged arm uses the facade's own retrieval |
